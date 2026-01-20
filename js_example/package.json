@@ -1,0 +1,23 @@
+{
+  "name": "js-example",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@noble/hashes": "^1.6.0",
+    "@noble/post-quantum": "*",
+    "@polkadot/api": "12.4.2",
+    "@polkadot/keyring": "13.0.2",
+    "@polkadot/util-crypto": "13.0.2",
+    "bs58": "^5.0.0",
+    "dotenv": "^16.4.5"
+  },
+  "overrides": {
+    "@polkadot/keyring": "13.0.2",
+    "@polkadot/util": "13.0.2",
+    "@polkadot/util-crypto": "13.0.2"
+  }
+}

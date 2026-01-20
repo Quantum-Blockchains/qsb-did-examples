@@ -1,0 +1,25 @@
+[tool.poetry]
+name = "python-example"
+version = "0.1.0"
+description = "Python example project"
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+packages = [{ include = "app", from = "src" }]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+substrate-interface = "^1.7.0"
+python-dotenv = "^1.0.1"
+pqcrypto = "0.3.4"
+base58 = "^2.1.1"
+cryptography = "^42.0.5"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+
+[tool.poetry.scripts]
+app = "app.main:main"
+
+[build-system]
+requires = ["poetry-core>=1.7.0"]
+build-backend = "poetry.core.masonry.api"

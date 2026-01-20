@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+
+# DID storage
+python_example/did_store.json
+js_example/did_store.json
