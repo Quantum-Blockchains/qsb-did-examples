@@ -16,6 +16,9 @@ Current demo flow includes:
 - Access to QSB-Poseidon RPC: `wss://qsb.qbck.io:9945`
 - Polkadot-js account JSON (encrypted)
 
+On the https://qsb.qbck.io/poseidon/
+ page, you can obtain funds for performing transactions by clicking the “Receive funds” button and providing your account address.
+
 ## Install
 
 ```bash
