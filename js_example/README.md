@@ -2,10 +2,18 @@
 
 Example client for QSB DID + Schema pallets (Node.js).
 
+Current demo flow includes:
+- DID create
+- key operations (`addKey`, `updateRoles`, `rotateKey`, `revokeKey`)
+- metadata operations (`setMetadata`, `removeMetadata`)
+- service operations (`addService`, `removeService`)
+- DID deactivation
+- schema register/deprecate
+
 ## Requirements
 
 - Node.js 18+
-- Access to `wss://qsb.qbck.io:9945`
+- Access to QSB-Poseidon RPC: `wss://qsb.qbck.io:9945`
 - Polkadot-js account JSON (encrypted)
 
 ## Install
@@ -26,23 +34,17 @@ npm start
 Create `js_example/.env`:
 
 ```
-ACCOUNT_JSON=/path/to/account.json
+ACCOUNT_JSON=./storage/account.json
 ACCOUNT_PASSWORD=your_password
 DID_STORE_PASSWORD=your_did_store_password
-DID_STORE_PATH=/path/to/did_store.json
-SCHEMA_JSON={"name":"example","version":"1.0"}
-SCHEMA_URI=https://example.com/schema
-SERVICE_ID=service-1
-SERVICE_TYPE=ExampleService
-SERVICE_ENDPOINT=https://example.com
-SSL_INSECURE=0
+DID_STORE_PATH=./storage/did_store.json
 ```
 
 Notes:
 - `ACCOUNT_JSON` can be passed as `--account-json` instead of `.env`.
 - `DID_STORE_PASSWORD` encrypts the DID private key stored on disk.
-- `SCHEMA_JSON` gets a random `_nonce` on each run to make it unique.
-- Set `SSL_INSECURE=1` to disable TLS verification if needed.
+- Schema and service demo values are hardcoded in `src/index.js` (`DEFAULT_SCHEMA_URI`, `DEFAULT_SERVICE_*`).
+- TLS verification is hardcoded as insecure in `src/substrate_client.js` for demo compatibility.
 
 ## Main libraries
 
@@ -52,3 +54,7 @@ Notes:
 - `@noble/hashes` (blake2b-256)
 - `bs58` (DID/Schema IDs)
 - `dotenv` (load `.env`)
+
+## Detailed Guide
+
+- Full step-by-step guide with code snippets: `../docs/js-did-guide.md`

@@ -12,5 +12,5 @@ node_modules/
 .DS_Store
 
 # DID storage
-python_example/did_store.json
-js_example/did_store.json
+python_example/storage/
+js_example/storage/

@@ -6,9 +6,7 @@ function toBytesArg(value) {
 }
 
 export async function createApi(url) {
-  if (process.env.SSL_INSECURE === '1') {
-    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-  }
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
   const provider = new WsProvider(url);
   const api = await ApiPromise.create({ provider });
   return api;
@@ -41,18 +39,101 @@ export async function createDid(api, account, publicKey, didSignature) {
   return submitExtrinsic(tx, account);
 }
 
-export async function addService(api, account, didId, serviceId, serviceType, endpoint) {
+export async function addKey(api, account, didId, publicKey, roles, didSignature) {
+  const tx = api.tx.did.addKey(
+    toBytesArg(didId),
+    toBytesArg(publicKey),
+    roles,
+    toBytesArg(didSignature)
+  );
+  return submitExtrinsic(tx, account);
+}
+
+export async function revokeKey(api, account, didId, publicKey, didSignature) {
+  const tx = api.tx.did.revokeKey(
+    toBytesArg(didId),
+    toBytesArg(publicKey),
+    toBytesArg(didSignature)
+  );
+  return submitExtrinsic(tx, account);
+}
+
+export async function deactivateDid(api, account, didId, didSignature) {
+  const tx = api.tx.did.deactivateDid(toBytesArg(didId), toBytesArg(didSignature));
+  return submitExtrinsic(tx, account);
+}
+
+export async function addService(
+  api,
+  account,
+  didId,
+  serviceId,
+  serviceType,
+  endpoint,
+  didSignature
+) {
   const service = {
     id: toBytesArg(serviceId),
     service_type: toBytesArg(serviceType),
     endpoint: toBytesArg(endpoint),
   };
-  const tx = api.tx.did.addService(toBytesArg(didId), service);
+  const tx = api.tx.did.addService(toBytesArg(didId), service, toBytesArg(didSignature));
   return submitExtrinsic(tx, account);
 }
 
-export async function removeService(api, account, didId, serviceId) {
-  const tx = api.tx.did.removeService(toBytesArg(didId), toBytesArg(serviceId));
+export async function removeService(api, account, didId, serviceId, didSignature) {
+  const tx = api.tx.did.removeService(
+    toBytesArg(didId),
+    toBytesArg(serviceId),
+    toBytesArg(didSignature)
+  );
+  return submitExtrinsic(tx, account);
+}
+
+export async function setMetadata(api, account, didId, key, value, didSignature) {
+  const entry = {
+    key: toBytesArg(key),
+    value: toBytesArg(value),
+  };
+  const tx = api.tx.did.setMetadata(toBytesArg(didId), entry, toBytesArg(didSignature));
+  return submitExtrinsic(tx, account);
+}
+
+export async function removeMetadata(api, account, didId, key, didSignature) {
+  const tx = api.tx.did.removeMetadata(
+    toBytesArg(didId),
+    toBytesArg(key),
+    toBytesArg(didSignature)
+  );
+  return submitExtrinsic(tx, account);
+}
+
+export async function rotateKey(
+  api,
+  account,
+  didId,
+  oldPublicKey,
+  newPublicKey,
+  roles,
+  didSignature
+) {
+  const tx = api.tx.did.rotateKey(
+    toBytesArg(didId),
+    toBytesArg(oldPublicKey),
+    toBytesArg(newPublicKey),
+    roles,
+    toBytesArg(didSignature)
+  );
+  return submitExtrinsic(tx, account);
+}
+
+export async function updateRoles(api, account, didId, publicKey, roles, didSignature) {
+  const tx = api.tx.did.updateRoles(
+    toBytesArg(didId),
+    toBytesArg(publicKey),
+    roles,
+    toBytesArg(didSignature)
+  );
   return submitExtrinsic(tx, account);
 }
 
