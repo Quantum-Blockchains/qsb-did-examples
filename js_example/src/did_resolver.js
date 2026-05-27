@@ -23,6 +23,29 @@ function toString(value) {
   return new TextDecoder().decode(toBytes(value));
 }
 
+function encodeUvarint(value) {
+  const out = [];
+  let v = Number(value) >>> 0;
+  while (true) {
+    let b = v & 0x7f;
+    v >>>= 7;
+    if (v !== 0) b |= 0x80;
+    out.push(b);
+    if (v === 0) break;
+  }
+  return Uint8Array.from(out);
+}
+
+function toMultikey(publicKey, codec) {
+  if (codec == null) return null;
+  const raw = toBytes(publicKey);
+  const prefix = encodeUvarint(codec);
+  const out = new Uint8Array(prefix.length + raw.length);
+  out.set(prefix, 0);
+  out.set(raw, prefix.length);
+  return `u${Buffer.from(out).toString('base64url')}`;
+}
+
 export function didToDocument(did, details) {
   const roleMap = {
     Authentication: 'authentication',
@@ -34,8 +57,8 @@ export function didToDocument(did, details) {
 
   const services = (details.services || []).map((service) => ({
     id: toString(service.id ?? service.service_id),
-    service_type: toString(service.service_type ?? service.serviceType),
-    endpoint: toString(service.endpoint),
+    type: toString(service.service_type ?? service.serviceType ?? service.type),
+    serviceEndpoint: toString(service.endpoint ?? service.serviceEndpoint),
   }));
 
   const metadata = (details.metadata || []).map((item) => ({
@@ -44,10 +67,8 @@ export function didToDocument(did, details) {
   }));
 
   const doc = {
-    '@context': ['https://www.w3.org/ns/did/v1'],
+    '@context': ['https://www.w3.org/ns/did/v1', 'https://w3id.org/security/multikey/v1'],
     id: did,
-    version: details.version,
-    deactivated: details.deactivated,
     verificationMethod: [],
     authentication: [],
     assertionMethod: [],
@@ -58,18 +79,20 @@ export function didToDocument(did, details) {
     metadata,
   };
 
-  (details.keys || []).forEach((key, index) => {
-    const keyId = `${did}#keys-${index + 1}`;
+  (details.keys || [])
+    .filter((key) => !(key.revoked ?? false))
+    .forEach((key) => {
+    const keyId = toString(key.key_id ?? key.keyId);
+    const controller = toString(key.controller ?? did);
     const publicKeyBytes = toBytes(key.public_key ?? key.publicKey);
-    const publicKeyMultibase = `z${bs58.encode(publicKeyBytes)}`;
+    const codec = key.multicodec ?? null;
+    const publicKeyMultibase = toMultikey(publicKeyBytes, codec) ?? `z${bs58.encode(publicKeyBytes)}`;
     const roles = key.roles || [];
     doc.verificationMethod.push({
       id: keyId,
-      type: 'ML-DSA-44',
-      controller: did,
+      type: 'Multikey',
+      controller,
       publicKeyMultibase,
-      revoked: key.revoked ?? false,
-      roles,
     });
     roles.forEach((role) => {
       const field = roleMap[role];
@@ -81,10 +104,33 @@ export function didToDocument(did, details) {
 }
 
 export async function resolveDid(api, did) {
+  const success = (details) => ({
+    didDocument: didToDocument(did, details),
+    didDocumentMetadata: {
+      deactivated: details?.deactivated ?? false,
+      versionId: details?.version ?? 0,
+    },
+    didResolutionMetadata: {
+      contentType: 'application/did+ld+json',
+      error: null,
+    },
+  });
+  const notFound = () => ({
+    didDocument: null,
+    didDocumentMetadata: {
+      deactivated: false,
+      versionId: 0,
+    },
+    didResolutionMetadata: {
+      contentType: null,
+      error: 'notFound',
+    },
+  });
+
   if (api.rpc?.did?.getByString) {
     const opt = await api.rpc.did.getByString(did);
     const result = opt?.toJSON ? opt.toJSON() : null;
-    if (result) return didToDocument(did, result);
+    if (result) return success(result);
   }
   const provider = getProvider(api);
   if (provider?.send) {
@@ -93,14 +139,14 @@ export async function resolveDid(api, did) {
     if (result) {
       if (typeof result === 'string' && result.startsWith('0x')) {
         const decoded = decodeDidDetails(api, result);
-        if (decoded) return didToDocument(did, decoded);
+        if (decoded) return success(decoded);
       }
       if (typeof result === 'object') {
-        return didToDocument(did, result);
+        return success(result);
       }
     }
   }
-  return null;
+  return notFound();
 }
 
 function decodeDidDetails(api, hex) {

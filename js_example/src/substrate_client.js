@@ -39,20 +39,31 @@ export async function createDid(api, account, publicKey, didSignature) {
   return submitExtrinsic(tx, account);
 }
 
-export async function addKey(api, account, didId, publicKey, roles, didSignature) {
+export async function addKey(
+  api,
+  account,
+  didId,
+  keyIdSuffix,
+  publicKey,
+  roles,
+  controller,
+  didSignature
+) {
   const tx = api.tx.did.addKey(
     toBytesArg(didId),
+    keyIdSuffix == null ? null : toBytesArg(keyIdSuffix),
     toBytesArg(publicKey),
     roles,
+    controller == null ? null : toBytesArg(controller),
     toBytesArg(didSignature)
   );
   return submitExtrinsic(tx, account);
 }
 
-export async function revokeKey(api, account, didId, publicKey, didSignature) {
+export async function revokeKey(api, account, didId, keyId, didSignature) {
   const tx = api.tx.did.revokeKey(
     toBytesArg(didId),
-    toBytesArg(publicKey),
+    toBytesArg(keyId),
     toBytesArg(didSignature)
   );
   return submitExtrinsic(tx, account);
@@ -112,25 +123,29 @@ export async function rotateKey(
   api,
   account,
   didId,
-  oldPublicKey,
+  oldKeyId,
   newPublicKey,
+  newKeyIdSuffix,
+  newController,
   roles,
   didSignature
 ) {
   const tx = api.tx.did.rotateKey(
     toBytesArg(didId),
-    toBytesArg(oldPublicKey),
+    toBytesArg(oldKeyId),
     toBytesArg(newPublicKey),
+    newKeyIdSuffix == null ? null : toBytesArg(newKeyIdSuffix),
+    newController == null ? null : toBytesArg(newController),
     roles,
     toBytesArg(didSignature)
   );
   return submitExtrinsic(tx, account);
 }
 
-export async function updateRoles(api, account, didId, publicKey, roles, didSignature) {
+export async function updateRoles(api, account, didId, keyId, roles, didSignature) {
   const tx = api.tx.did.updateRoles(
     toBytesArg(didId),
-    toBytesArg(publicKey),
+    toBytesArg(keyId),
     roles,
     toBytesArg(didSignature)
   );

@@ -49,6 +49,7 @@ const DEFAULT_SERVICE_TYPE = 'ExampleService';
 const DEFAULT_SERVICE_ENDPOINT = 'https://example.com';
 const DEFAULT_SCHEMA_URI = 'https://example.com/schema';
 const DEFAULT_SCHEMA_BASE = { name: 'example', version: '1.0' };
+const MULTICODEC_ML_DSA_44 = 0x1210;
 
 function getArgValue(flag) {
   const args = process.argv.slice(2);
@@ -92,6 +93,24 @@ function toBytes(value) {
 function toBytesArg(value) {
   if (Array.isArray(value)) return value;
   return Array.from(value);
+}
+
+function encodeUvarint(value) {
+  const out = [];
+  let v = value >>> 0;
+  while (true) {
+    let b = v & 0x7f;
+    v >>>= 7;
+    if (v !== 0) b |= 0x80;
+    out.push(b);
+    if (v === 0) break;
+  }
+  return Uint8Array.from(out);
+}
+
+function toMultikey(publicKey, codec = MULTICODEC_ML_DSA_44) {
+  const prefixed = concatBytes(encodeUvarint(codec), publicKey);
+  return `u${Buffer.from(prefixed).toString('base64url')}`;
 }
 
 function buildDidPayload(prefix, call) {
@@ -150,10 +169,10 @@ async function main() {
     did = `did:qsb:${didId}`;
     console.log(`${LOG_DID} DID: ${did}`);
 
-    const createDidCall = api.tx.did.createDid(toBytesArg(publicKey), []);
+    const createDidCall = api.tx.did.createDid(toBytesArg(toBytes(toMultikey(publicKey))), []);
     const payload = buildDidPayload(DID_CREATE_PREFIX, createDidCall);
     const signature = ml_dsa44.sign(privateKey, payload);
-    const result = await createDid(api, account, publicKey, signature);
+    const result = await createDid(api, account, toBytes(toMultikey(publicKey)), signature);
     logReceipt(result);
     if (result.dispatchError) {
       throw new Error('DID create failed; not saving DID keys');
@@ -164,13 +183,9 @@ async function main() {
   const genesisHash = (await api.rpc.chain.getBlockHash(0)).toHex();
 
   console.log(`${LOG_STEP} Step: resolve DID document`);
-  const didDoc = await resolveDid(api, did);
-  if (didDoc) {
-    console.log(`${LOG_DID} DID document:`);
-    console.log(JSON.stringify(didDoc, null, 2));
-  } else {
-    console.log(`${LOG_WARN} DID not found or invalid response`);
-  }
+  const didResolution = await resolveDid(api, did);
+  console.log(`${LOG_DID} DID resolution:`);
+  console.log(JSON.stringify(didResolution, null, 2));
 
   const didId = toBytes(did);
   const didIdArg = toBytesArg(didId);
@@ -178,11 +193,16 @@ async function main() {
   console.log(`${LOG_STEP} Step: add DID key (assertion method)`);
   const secondary = ml_dsa44.keygen(randomBytes(32));
   const secondaryPublicKey = secondary.publicKey ?? secondary[0];
+  const secondaryMultikey = toBytes(toMultikey(secondaryPublicKey));
+  const secondaryKeySuffix = toBytes('#key-1');
+  const secondaryKeyId = toBytes(`${did}#key-1`);
   const addKeyRoles = ['AssertionMethod'];
   const addKeyCall = api.tx.did.addKey(
     didIdArg,
-    toBytesArg(secondaryPublicKey),
+    toBytesArg(secondaryKeySuffix),
+    toBytesArg(secondaryMultikey),
     addKeyRoles,
+    null,
     []
   );
   const addKeySignature = signDidCall(privateKey, DID_ADD_KEY_PREFIX, addKeyCall);
@@ -190,8 +210,10 @@ async function main() {
     api,
     account,
     didIdArg,
-    secondaryPublicKey,
+    secondaryKeySuffix,
+    secondaryMultikey,
     addKeyRoles,
+    null,
     addKeySignature
   );
   logReceipt(result);
@@ -200,7 +222,7 @@ async function main() {
   const updatedRoles = ['CapabilityInvocation'];
   const updateRolesCall = api.tx.did.updateRoles(
     didIdArg,
-    toBytesArg(secondaryPublicKey),
+    toBytesArg(secondaryKeyId),
     updatedRoles,
     []
   );
@@ -209,7 +231,7 @@ async function main() {
     api,
     account,
     didIdArg,
-    secondaryPublicKey,
+    secondaryKeyId,
     updatedRoles,
     updateRolesSignature
   );
@@ -218,11 +240,16 @@ async function main() {
   console.log(`${LOG_STEP} Step: rotate DID key`);
   const rotated = ml_dsa44.keygen(randomBytes(32));
   const rotatedPublicKey = rotated.publicKey ?? rotated[0];
+  const rotatedMultikey = toBytes(toMultikey(rotatedPublicKey));
+  const rotatedKeySuffix = toBytes('#key-2');
+  const rotatedKeyId = toBytes(`${did}#key-2`);
   const rotateRoles = ['CapabilityDelegation'];
   const rotateKeyCall = api.tx.did.rotateKey(
     didIdArg,
-    toBytesArg(secondaryPublicKey),
-    toBytesArg(rotatedPublicKey),
+    toBytesArg(secondaryKeyId),
+    toBytesArg(rotatedMultikey),
+    toBytesArg(rotatedKeySuffix),
+    null,
     rotateRoles,
     []
   );
@@ -231,8 +258,10 @@ async function main() {
     api,
     account,
     didIdArg,
-    secondaryPublicKey,
-    rotatedPublicKey,
+    secondaryKeyId,
+    rotatedMultikey,
+    rotatedKeySuffix,
+    null,
     rotateRoles,
     rotateKeySignature
   );
@@ -285,13 +314,9 @@ async function main() {
   logReceipt(result);
 
   console.log(`${LOG_STEP} Step: resolve DID document (after add service)`);
-  const didDoc2 = await resolveDid(api, did);
-  if (didDoc2) {
-    console.log(`${LOG_DID} DID document:`);
-    console.log(JSON.stringify(didDoc2, null, 2));
-  } else {
-    console.log(`${LOG_WARN} DID not found or invalid response`);
-  }
+  const didResolution2 = await resolveDid(api, did);
+  console.log(`${LOG_DID} DID resolution:`);
+  console.log(JSON.stringify(didResolution2, null, 2));
 
   console.log(`${LOG_STEP} Step: remove DID service`);
   const removeServiceCall = api.tx.did.removeService(didIdArg, serviceIdArg, []);
@@ -313,9 +338,9 @@ async function main() {
   logReceipt(result);
 
   console.log(`${LOG_STEP} Step: revoke rotated DID key`);
-  const revokeKeyCall = api.tx.did.revokeKey(didIdArg, toBytesArg(rotatedPublicKey), []);
+  const revokeKeyCall = api.tx.did.revokeKey(didIdArg, toBytesArg(rotatedKeyId), []);
   const revokeKeySignature = signDidCall(privateKey, DID_REVOKE_KEY_PREFIX, revokeKeyCall);
-  result = await revokeKey(api, account, didIdArg, rotatedPublicKey, revokeKeySignature);
+  result = await revokeKey(api, account, didIdArg, rotatedKeyId, revokeKeySignature);
   logReceipt(result);
 
   console.log(`${LOG_STEP} Step: register schema`);
