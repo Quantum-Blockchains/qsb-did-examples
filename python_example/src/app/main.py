@@ -1,4 +1,5 @@
 import argparse
+import base64
 import json
 import os
 from getpass import getpass
@@ -51,6 +52,7 @@ DEFAULT_SERVICE_TYPE = b"ExampleService"
 DEFAULT_SERVICE_ENDPOINT = b"https://example.com"
 DEFAULT_SCHEMA_URI = b"https://example.com/schema"
 DEFAULT_SCHEMA_BASE = {"name": "example", "version": "1.0"}
+MULTICODEC_ML_DSA_44 = 0x1210
 
 KEY_ROLE_INDEX = {
     "Authentication": 0,
@@ -75,6 +77,32 @@ def _scale_compact_u32(value: int) -> bytes:
 
 def _scale_vec_u8(data: bytes) -> bytes:
     return _scale_compact_u32(len(data)) + data
+
+
+def _scale_option_vec_u8(data: bytes | None) -> bytes:
+    if data is None:
+        return b"\x00"
+    return b"\x01" + _scale_vec_u8(data)
+
+
+def _encode_uvarint(value: int) -> bytes:
+    out = bytearray()
+    v = value
+    while True:
+        b = v & 0x7F
+        v >>= 7
+        if v:
+            b |= 0x80
+        out.append(b)
+        if not v:
+            break
+    return bytes(out)
+
+
+def to_multikey(public_key: bytes, codec: int = MULTICODEC_ML_DSA_44) -> bytes:
+    prefixed = _encode_uvarint(codec) + public_key
+    encoded = base64.urlsafe_b64encode(prefixed).decode("ascii").rstrip("=")
+    return f"u{encoded}".encode("utf-8")
 
 
 def build_create_did_payload(public_key: bytes) -> bytes:
@@ -105,17 +133,25 @@ def _scale_roles(roles: list[str]) -> bytes:
     return bytes(encoded)
 
 
-def build_add_key_payload(did_id: bytes, public_key: bytes, roles: list[str]) -> bytes:
+def build_add_key_payload(
+    did_id: bytes,
+    key_id_suffix: bytes | None,
+    public_key: bytes,
+    roles: list[str],
+    controller: bytes | None,
+) -> bytes:
     return (
         DID_ADD_KEY_PREFIX
         + _scale_vec_u8(did_id)
+        + _scale_option_vec_u8(key_id_suffix)
         + _scale_vec_u8(public_key)
         + _scale_roles(roles)
+        + _scale_option_vec_u8(controller)
     )
 
 
-def build_revoke_key_payload(did_id: bytes, public_key: bytes) -> bytes:
-    return DID_REVOKE_KEY_PREFIX + _scale_vec_u8(did_id) + _scale_vec_u8(public_key)
+def build_revoke_key_payload(did_id: bytes, key_id: bytes) -> bytes:
+    return DID_REVOKE_KEY_PREFIX + _scale_vec_u8(did_id) + _scale_vec_u8(key_id)
 
 
 def build_set_metadata_payload(did_id: bytes, key: bytes, value: bytes) -> bytes:
@@ -128,21 +164,25 @@ def build_remove_metadata_payload(did_id: bytes, key: bytes) -> bytes:
 
 def build_rotate_key_payload(
     did_id: bytes,
-    old_public_key: bytes,
+    old_key_id: bytes,
     new_public_key: bytes,
+    new_key_id_suffix: bytes | None,
+    new_controller: bytes | None,
     roles: list[str],
 ) -> bytes:
     return (
         DID_ROTATE_KEY_PREFIX
         + _scale_vec_u8(did_id)
-        + _scale_vec_u8(old_public_key)
+        + _scale_vec_u8(old_key_id)
         + _scale_vec_u8(new_public_key)
+        + _scale_option_vec_u8(new_key_id_suffix)
+        + _scale_option_vec_u8(new_controller)
         + _scale_roles(roles)
     )
 
 
-def build_update_roles_payload(did_id: bytes, public_key: bytes, roles: list[str]) -> bytes:
-    return DID_UPDATE_ROLES_PREFIX + _scale_vec_u8(did_id) + _scale_vec_u8(public_key) + _scale_roles(roles)
+def build_update_roles_payload(did_id: bytes, key_id: bytes, roles: list[str]) -> bytes:
+    return DID_UPDATE_ROLES_PREFIX + _scale_vec_u8(did_id) + _scale_vec_u8(key_id) + _scale_roles(roles)
 
 
 def build_deactivate_did_payload(did_id: bytes) -> bytes:
@@ -205,9 +245,10 @@ def main() -> None:
         did = f"did:qsb:{did_id}"
         print(f"{LOG_DID} DID: {did}")
 
-        payload = build_create_did_payload(public_key)
+        did_multikey = to_multikey(public_key)
+        payload = build_create_did_payload(did_multikey)
         did_signature = sign(private_key, payload)
-        receipt = create_did(substrate, account, public_key, did_signature)
+        receipt = create_did(substrate, account, did_multikey, did_signature)
         log_receipt(receipt)
         is_success = getattr(receipt, "is_success", None)
         if is_success is None:
@@ -219,28 +260,36 @@ def main() -> None:
     if "genesis_hash" not in locals():
         genesis_hash = substrate.get_block_hash(0)
     print(f"{LOG_STEP} Step: resolve DID document")
-    did_doc = resolve_did(substrate, did)
-    if did_doc:
-        print(f"{LOG_DID} DID document:")
-        print(json.dumps(did_doc, indent=2))
-    else:
-        print(f"{LOG_WARN} DID not found or invalid response")
+    did_resolution = resolve_did(substrate, did)
+    print(f"{LOG_DID} DID resolution:")
+    print(json.dumps(did_resolution, indent=2))
 
     did_bytes = did.encode("utf-8")
 
     print(f"{LOG_STEP} Step: add DID key (assertion method)")
     secondary_public_key, _ = generate_keypair()
+    secondary_multikey = to_multikey(secondary_public_key)
+    secondary_key_suffix = b"#key-1"
+    secondary_key_id = f"{did}#key-1".encode("utf-8")
     add_key_roles = ["AssertionMethod"]
     add_key_signature = sign(
         private_key,
-        build_add_key_payload(did_bytes, secondary_public_key, add_key_roles),
+        build_add_key_payload(
+            did_bytes,
+            secondary_key_suffix,
+            secondary_multikey,
+            add_key_roles,
+            None,
+        ),
     )
     receipt = add_key(
         substrate,
         account,
         did_bytes,
-        secondary_public_key,
+        secondary_key_suffix,
+        secondary_multikey,
         add_key_roles,
+        None,
         add_key_signature,
     )
     log_receipt(receipt)
@@ -249,13 +298,13 @@ def main() -> None:
     updated_roles = ["CapabilityInvocation"]
     update_roles_signature = sign(
         private_key,
-        build_update_roles_payload(did_bytes, secondary_public_key, updated_roles),
+        build_update_roles_payload(did_bytes, secondary_key_id, updated_roles),
     )
     receipt = update_roles(
         substrate,
         account,
         did_bytes,
-        secondary_public_key,
+        secondary_key_id,
         updated_roles,
         update_roles_signature,
     )
@@ -263,13 +312,18 @@ def main() -> None:
 
     print(f"{LOG_STEP} Step: rotate DID key")
     rotated_public_key, _ = generate_keypair()
+    rotated_multikey = to_multikey(rotated_public_key)
+    rotated_key_suffix = b"#key-2"
+    rotated_key_id = f"{did}#key-2".encode("utf-8")
     rotate_roles = ["CapabilityDelegation"]
     rotate_signature = sign(
         private_key,
         build_rotate_key_payload(
             did_bytes,
-            secondary_public_key,
-            rotated_public_key,
+            secondary_key_id,
+            rotated_multikey,
+            rotated_key_suffix,
+            None,
             rotate_roles,
         ),
     )
@@ -277,8 +331,10 @@ def main() -> None:
         substrate,
         account,
         did_bytes,
-        secondary_public_key,
-        rotated_public_key,
+        secondary_key_id,
+        rotated_multikey,
+        rotated_key_suffix,
+        None,
         rotate_roles,
         rotate_signature,
     )
@@ -321,12 +377,9 @@ def main() -> None:
     log_receipt(receipt)
 
     print(f"{LOG_STEP} Step: resolve DID document (after add service)")
-    did_doc = resolve_did(substrate, did)
-    if did_doc:
-        print(f"{LOG_DID} DID document:")
-        print(json.dumps(did_doc, indent=2))
-    else:
-        print(f"{LOG_WARN} DID not found or invalid response")
+    did_resolution = resolve_did(substrate, did)
+    print(f"{LOG_DID} DID resolution:")
+    print(json.dumps(did_resolution, indent=2))
 
     print(f"{LOG_STEP} Step: remove DID service")
     receipt = remove_service(
@@ -355,13 +408,13 @@ def main() -> None:
     print(f"{LOG_STEP} Step: revoke rotated DID key")
     revoke_key_signature = sign(
         private_key,
-        build_revoke_key_payload(did_bytes, rotated_public_key),
+        build_revoke_key_payload(did_bytes, rotated_key_id),
     )
     receipt = revoke_key(
         substrate,
         account,
         did_bytes,
-        rotated_public_key,
+        rotated_key_id,
         revoke_key_signature,
     )
     log_receipt(receipt)

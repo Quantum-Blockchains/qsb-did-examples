@@ -1,4 +1,27 @@
 import base58
+import base64
+
+
+def encode_uvarint(value: int) -> bytes:
+    out = bytearray()
+    v = value
+    while True:
+        b = v & 0x7F
+        v >>= 7
+        if v:
+            b |= 0x80
+        out.append(b)
+        if not v:
+            break
+    return bytes(out)
+
+
+def to_multikey(public_key: bytes, codec: int | None) -> str:
+    if codec is None:
+        return "z" + base58.b58encode(public_key).decode("ascii")
+    prefixed = encode_uvarint(codec) + public_key
+    encoded = base64.urlsafe_b64encode(prefixed).decode("ascii").rstrip("=")
+    return f"u{encoded}"
 
 
 def did_to_document(did: str, details: dict) -> dict:
@@ -11,11 +34,13 @@ def did_to_document(did: str, details: dict) -> dict:
     }
     services = []
     for service in details.get("services", []):
+        service_type = service.get("service_type", service.get("type", b""))
+        service_endpoint = service.get("endpoint", service.get("serviceEndpoint", b""))
         services.append(
             {
                 "id": bytes(service["id"]).decode("utf-8", errors="replace"),
-                "service_type": bytes(service["service_type"]).decode("utf-8", errors="replace"),
-                "endpoint": bytes(service["endpoint"]).decode("utf-8", errors="replace"),
+                "type": bytes(service_type).decode("utf-8", errors="replace"),
+                "serviceEndpoint": bytes(service_endpoint).decode("utf-8", errors="replace"),
             }
         )
 
@@ -29,10 +54,8 @@ def did_to_document(did: str, details: dict) -> dict:
         )
 
     doc = {
-        "@context": ["https://www.w3.org/ns/did/v1"],
+        "@context": ["https://www.w3.org/ns/did/v1", "https://w3id.org/security/multikey/v1"],
         "id": did,
-        "version": details.get("version"),
-        "deactivated": details.get("deactivated"),
         "verificationMethod": [],
         "authentication": [],
         "assertionMethod": [],
@@ -42,17 +65,18 @@ def did_to_document(did: str, details: dict) -> dict:
         "service": services,
         "metadata": metadata,
     }
-    for index, key in enumerate(details.get("keys", []), start=1):
-        key_id = f"{did}#keys-{index}"
+    for key in details.get("keys", []):
+        if key.get("revoked", False):
+            continue
+        key_id = bytes(key["key_id"]).decode("utf-8", errors="replace")
         public_key_bytes = bytes(key["public_key"])
-        public_key_multibase = "z" + base58.b58encode(public_key_bytes).decode("ascii")
+        public_key_multibase = to_multikey(public_key_bytes, key.get("multicodec"))
+        controller = bytes(key.get("controller") or did.encode("utf-8")).decode("utf-8", errors="replace")
         vm = {
             "id": key_id,
-            "type": "ML-DSA-44",
-            "controller": did,
+            "type": "Multikey",
+            "controller": controller,
             "publicKeyMultibase": public_key_multibase,
-            "revoked": key.get("revoked", False),
-            "roles": key.get("roles", []),
         }
         doc["verificationMethod"].append(vm)
         for role in key.get("roles", []):
@@ -62,11 +86,31 @@ def did_to_document(did: str, details: dict) -> dict:
     return doc
 
 
-def resolve_did(substrate, did: str) -> dict | None:
+def resolve_did(substrate, did: str) -> dict:
     response = substrate.rpc_request("did_getByString", [did])
-    if not isinstance(response, dict):
-        return None
-    result = response.get("result")
-    if not result:
-        return None
-    return did_to_document(did, result)
+    if isinstance(response, dict):
+        result = response.get("result")
+        if result:
+            return {
+                "didDocument": did_to_document(did, result),
+                "didDocumentMetadata": {
+                    "deactivated": result.get("deactivated", False),
+                    "versionId": result.get("version", 0),
+                },
+                "didResolutionMetadata": {
+                    "contentType": "application/did+ld+json",
+                    "error": None,
+                },
+            }
+
+    return {
+        "didDocument": None,
+        "didDocumentMetadata": {
+            "deactivated": False,
+            "versionId": 0,
+        },
+        "didResolutionMetadata": {
+            "contentType": None,
+            "error": "notFound",
+        },
+    }

@@ -32,8 +32,10 @@ def add_key(
     substrate: SubstrateInterface,
     account,
     did_id: bytes,
+    key_id_suffix: bytes | None,
     public_key: bytes,
     roles: list[str],
+    controller: bytes | None,
     did_signature: bytes,
 ):
     call = substrate.compose_call(
@@ -41,8 +43,10 @@ def add_key(
         call_function="add_key",
         call_params={
             "did_id": did_id,
+            "key_id_suffix": key_id_suffix,
             "public_key": public_key,
             "roles": roles,
+            "controller": controller,
             "did_signature": did_signature,
         },
     )
@@ -54,7 +58,7 @@ def revoke_key(
     substrate: SubstrateInterface,
     account,
     did_id: bytes,
-    public_key: bytes,
+    key_id: bytes,
     did_signature: bytes,
 ):
     call = substrate.compose_call(
@@ -62,7 +66,7 @@ def revoke_key(
         call_function="revoke_key",
         call_params={
             "did_id": did_id,
-            "public_key": public_key,
+            "key_id": key_id,
             "did_signature": did_signature,
         },
     )
@@ -224,8 +228,10 @@ def rotate_key(
     substrate: SubstrateInterface,
     account,
     did_id: bytes,
-    old_public_key: bytes,
+    old_key_id: bytes,
     new_public_key: bytes,
+    new_key_id_suffix: bytes | None,
+    new_controller: bytes | None,
     roles: list[str],
     did_signature: bytes,
 ):
@@ -234,8 +240,10 @@ def rotate_key(
         call_function="rotate_key",
         call_params={
             "did_id": did_id,
-            "old_public_key": old_public_key,
+            "old_key_id": old_key_id,
             "new_public_key": new_public_key,
+            "new_key_id_suffix": new_key_id_suffix,
+            "new_controller": new_controller,
             "roles": roles,
             "did_signature": did_signature,
         },
@@ -248,7 +256,7 @@ def update_roles(
     substrate: SubstrateInterface,
     account,
     did_id: bytes,
-    public_key: bytes,
+    key_id: bytes,
     roles: list[str],
     did_signature: bytes,
 ):
@@ -257,7 +265,7 @@ def update_roles(
         call_function="update_roles",
         call_params={
             "did_id": did_id,
-            "public_key": public_key,
+            "key_id": key_id,
             "roles": roles,
             "did_signature": did_signature,
         },
