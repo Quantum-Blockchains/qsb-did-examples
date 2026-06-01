@@ -45,7 +45,8 @@ DID_STORE_PATH=./storage/did_store.json
 ```
 
 Notes:
-- `ACCOUNT_JSON` can be passed as `--account-json` instead of `.env`.
+- `ACCOUNT_JSON` and `ACCOUNT_PASSWORD` are required in `.env`.
+- If `ACCOUNT_JSON` does not exist, the app creates a new encrypted account JSON at that path.
 - `DID_STORE_PASSWORD` is used to encrypt the DID private key stored on disk.
 - Schema and service demo values are hardcoded in `src/app/main.py` (`DEFAULT_SCHEMA_URI`, `DEFAULT_SERVICE_*`).
 - TLS verification is hardcoded as insecure in `src/app/substrate_client.py` for demo compatibility.

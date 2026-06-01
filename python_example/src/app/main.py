@@ -2,10 +2,10 @@ import argparse
 import base64
 import json
 import os
-from getpass import getpass
-from uuid import uuid4
 
 from dotenv import load_dotenv
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519
 from pqcrypto.sign.ml_dsa_44 import generate_keypair, sign
 from substrateinterface import Keypair
 
@@ -16,43 +16,27 @@ from app.substrate_client import (
     add_service,
     create_did,
     create_substrate,
-    deactivate_did,
-    deprecate_schema,
     get_free_balance,
-    register_schema,
-    remove_metadata,
-    remove_service,
-    revoke_key,
-    rotate_key,
     set_metadata,
-    update_roles,
 )
-from app.did_utils import derive_did_id, derive_schema_id
+from app.did_utils import derive_did_id
 from app.tx_logger import log_receipt
 
 LOG_OK = "✅"
 LOG_WARN = "⚠️"
 LOG_DID = "🪪"
-LOG_SCHEMA = "📜"
 LOG_STEP = "➡️"
 RPC_URL = "wss://qsb.qbck.io:9945"
-SCHEMA_PREFIX = b"QSB_SCHEMA"
 DID_CREATE_PREFIX = b"QSB_DID_CREATE"
 DID_ADD_KEY_PREFIX = b"QSB_DID_ADD_KEY"
-DID_REVOKE_KEY_PREFIX = b"QSB_DID_REVOKE_KEY"
-DID_DEACTIVATE_PREFIX = b"QSB_DID_DEACTIVATE"
 DID_ADD_SERVICE_PREFIX = b"QSB_DID_ADD_SERVICE"
-DID_REMOVE_SERVICE_PREFIX = b"QSB_DID_REMOVE_SERVICE"
 DID_SET_METADATA_PREFIX = b"QSB_DID_SET_METADATA"
-DID_REMOVE_METADATA_PREFIX = b"QSB_DID_REMOVE_METADATA"
-DID_ROTATE_KEY_PREFIX = b"QSB_DID_ROTATE_KEY"
-DID_UPDATE_ROLES_PREFIX = b"QSB_DID_UPDATE_ROLES"
 DEFAULT_SERVICE_ID = b"service-1"
 DEFAULT_SERVICE_TYPE = b"ExampleService"
 DEFAULT_SERVICE_ENDPOINT = b"https://example.com"
-DEFAULT_SCHEMA_URI = b"https://example.com/schema"
-DEFAULT_SCHEMA_BASE = {"name": "example", "version": "1.0"}
 MULTICODEC_ML_DSA_44 = 0x1210
+MULTICODEC_ED25519_PUB = 0xED
+MULTICODEC_P256_PUB = 0x1201
 
 KEY_ROLE_INDEX = {
     "Authentication": 0,
@@ -121,10 +105,6 @@ def build_add_service_payload(
     return DID_ADD_SERVICE_PREFIX + _scale_vec_u8(did_id) + service_encoded
 
 
-def build_remove_service_payload(did_id: bytes, service_id: bytes) -> bytes:
-    return DID_REMOVE_SERVICE_PREFIX + _scale_vec_u8(did_id) + _scale_vec_u8(service_id)
-
-
 def _scale_roles(roles: list[str]) -> bytes:
     encoded = bytearray(_scale_compact_u32(len(roles)))
     for role in roles:
@@ -150,58 +130,28 @@ def build_add_key_payload(
     )
 
 
-def build_revoke_key_payload(did_id: bytes, key_id: bytes) -> bytes:
-    return DID_REVOKE_KEY_PREFIX + _scale_vec_u8(did_id) + _scale_vec_u8(key_id)
-
-
 def build_set_metadata_payload(did_id: bytes, key: bytes, value: bytes) -> bytes:
     return DID_SET_METADATA_PREFIX + _scale_vec_u8(did_id) + _scale_vec_u8(key) + _scale_vec_u8(value)
 
 
-def build_remove_metadata_payload(did_id: bytes, key: bytes) -> bytes:
-    return DID_REMOVE_METADATA_PREFIX + _scale_vec_u8(did_id) + _scale_vec_u8(key)
+def _create_and_store_account(json_path: str, password: str) -> Keypair:
+    account = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
+    account_json = account.export_to_encrypted_json(password, name="qsb-demo-account")
+    directory = os.path.dirname(json_path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(account_json, f, indent=2)
+    return account
 
 
-def build_rotate_key_payload(
-    did_id: bytes,
-    old_key_id: bytes,
-    new_public_key: bytes,
-    new_key_id_suffix: bytes | None,
-    new_controller: bytes | None,
-    roles: list[str],
-) -> bytes:
-    return (
-        DID_ROTATE_KEY_PREFIX
-        + _scale_vec_u8(did_id)
-        + _scale_vec_u8(old_key_id)
-        + _scale_vec_u8(new_public_key)
-        + _scale_option_vec_u8(new_key_id_suffix)
-        + _scale_option_vec_u8(new_controller)
-        + _scale_roles(roles)
-    )
+def load_or_create_account(json_path: str, password: str) -> Keypair:
+    if not os.path.exists(json_path):
+        print(f"{LOG_WARN} Account file not found. Creating new account at: {json_path}")
+        return _create_and_store_account(json_path, password)
 
-
-def build_update_roles_payload(did_id: bytes, key_id: bytes, roles: list[str]) -> bytes:
-    return DID_UPDATE_ROLES_PREFIX + _scale_vec_u8(did_id) + _scale_vec_u8(key_id) + _scale_roles(roles)
-
-
-def build_deactivate_did_payload(did_id: bytes) -> bytes:
-    return DID_DEACTIVATE_PREFIX + _scale_vec_u8(did_id)
-
-
-def build_schema_json() -> bytes:
-    schema_obj = dict(DEFAULT_SCHEMA_BASE)
-    schema_obj["_nonce"] = uuid4().hex
-    return json.dumps(schema_obj, separators=(",", ":")).encode("utf-8")
-
-
-def load_account(json_path: str) -> Keypair:
     with open(json_path, "r", encoding="utf-8") as f:
         account_json = json.load(f)
-
-    password = os.getenv("ACCOUNT_PASSWORD")
-    if not password:
-        password = getpass("Account password: ")
 
     try:
         return Keypair.create_from_encrypted_json(account_json, password)
@@ -209,24 +159,42 @@ def load_account(json_path: str) -> Keypair:
         raise RuntimeError("Failed to load account from JSON") from exc
 
 
+def generate_ed25519_multikey() -> bytes:
+    private_key = ed25519.Ed25519PrivateKey.generate()
+    public_key = private_key.public_key()
+    public_key_raw = public_key.public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    return to_multikey(public_key_raw, MULTICODEC_ED25519_PUB)
+
+
+def generate_p256_multikey() -> bytes:
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    public_key = private_key.public_key()
+    public_key_compressed = public_key.public_bytes(
+        encoding=serialization.Encoding.X962,
+        format=serialization.PublicFormat.CompressedPoint,
+    )
+    return to_multikey(public_key_compressed, MULTICODEC_P256_PUB)
+
+
 def main() -> None:
     load_dotenv()
     print(f"{LOG_STEP} Step: load config")
     parser = argparse.ArgumentParser(description="QSB DID + Schema demo client")
-    parser.add_argument(
-        "--account-json",
-        required=False,
-        help="Path to polkadot-js account JSON file",
-    )
-    args = parser.parse_args()
-    account_json_path = args.account_json or os.getenv("ACCOUNT_JSON")
+    parser.parse_args()
+    account_json_path = os.getenv("ACCOUNT_JSON")
     if not account_json_path:
-        raise SystemExit("Provide --account-json or set ACCOUNT_JSON in .env")
+        raise SystemExit("Set ACCOUNT_JSON in .env")
+    account_password = os.getenv("ACCOUNT_PASSWORD")
+    if not account_password:
+        raise SystemExit("Set ACCOUNT_PASSWORD in .env")
 
     print(f"{LOG_STEP} Step: connect substrate")
     substrate = create_substrate(RPC_URL)
     print(f"{LOG_STEP} Step: load account")
-    account = load_account(account_json_path)
+    account = load_or_create_account(account_json_path, account_password)
     print(f"{LOG_OK} Loaded account: {account.ss58_address}")
     print(f"{LOG_STEP} Step: fetch balance")
     free_balance = get_free_balance(substrate, account.ss58_address)
@@ -266,196 +234,94 @@ def main() -> None:
 
     did_bytes = did.encode("utf-8")
 
-    print(f"{LOG_STEP} Step: add DID key (assertion method)")
-    secondary_public_key, _ = generate_keypair()
-    secondary_multikey = to_multikey(secondary_public_key)
-    secondary_key_suffix = b"#key-1"
-    secondary_key_id = f"{did}#key-1".encode("utf-8")
-    add_key_roles = ["AssertionMethod"]
-    add_key_signature = sign(
-        private_key,
-        build_add_key_payload(
+    print(f"{LOG_STEP} Step: add DID keys for different roles")
+    keys_to_add = [
+        (b"#auth-mldsa44", ["Authentication"], to_multikey(generate_keypair()[0])),
+        (b"#invocation-mldsa44", ["CapabilityInvocation"], to_multikey(generate_keypair()[0])),
+        (b"#assertion-ed25519", ["AssertionMethod"], generate_ed25519_multikey()),
+        (b"#agreement-p256", ["KeyAgreement", "CapabilityDelegation"], generate_p256_multikey()),
+    ]
+    for key_suffix, roles, role_multikey in keys_to_add:
+        add_key_signature = sign(
+            private_key,
+            build_add_key_payload(did_bytes, key_suffix, role_multikey, roles, None),
+        )
+        receipt = add_key(
+            substrate,
+            account,
             did_bytes,
-            secondary_key_suffix,
-            secondary_multikey,
-            add_key_roles,
+            key_suffix,
+            role_multikey,
+            roles,
             None,
-        ),
-    )
-    receipt = add_key(
-        substrate,
-        account,
-        did_bytes,
-        secondary_key_suffix,
-        secondary_multikey,
-        add_key_roles,
-        None,
-        add_key_signature,
-    )
-    log_receipt(receipt)
+            add_key_signature,
+        )
+        print(f"{LOG_DID} Added key {did}{key_suffix.decode('utf-8')} roles={roles}")
+        log_receipt(receipt)
 
-    print(f"{LOG_STEP} Step: update DID key roles")
-    updated_roles = ["CapabilityInvocation"]
-    update_roles_signature = sign(
-        private_key,
-        build_update_roles_payload(did_bytes, secondary_key_id, updated_roles),
-    )
-    receipt = update_roles(
-        substrate,
-        account,
-        did_bytes,
-        secondary_key_id,
-        updated_roles,
-        update_roles_signature,
-    )
-    log_receipt(receipt)
-
-    print(f"{LOG_STEP} Step: rotate DID key")
-    rotated_public_key, _ = generate_keypair()
-    rotated_multikey = to_multikey(rotated_public_key)
-    rotated_key_suffix = b"#key-2"
-    rotated_key_id = f"{did}#key-2".encode("utf-8")
-    rotate_roles = ["CapabilityDelegation"]
-    rotate_signature = sign(
-        private_key,
-        build_rotate_key_payload(
+    print(f"{LOG_STEP} Step: add DID metadata")
+    metadata_entries = [
+        (b"profile", b"https://profiles.example.org/alice"),
+        (b"organization", b"QSB Labs"),
+        (b"environment", b"demo"),
+        (b"keySuite", b"ML-DSA-44,Ed25519,P-256"),
+    ]
+    for metadata_key, metadata_value in metadata_entries:
+        set_metadata_signature = sign(
+            private_key,
+            build_set_metadata_payload(did_bytes, metadata_key, metadata_value),
+        )
+        receipt = set_metadata(
+            substrate,
+            account,
             did_bytes,
-            secondary_key_id,
-            rotated_multikey,
-            rotated_key_suffix,
-            None,
-            rotate_roles,
+            metadata_key,
+            metadata_value,
+            set_metadata_signature,
+        )
+        print(f"{LOG_OK} Metadata set: {metadata_key.decode('utf-8')}")
+        log_receipt(receipt)
+
+    print(f"{LOG_STEP} Step: add multiple DID services with DID URL id + full URI endpoint")
+    services_to_add = [
+        (
+            f"{did}#messaging".encode("utf-8"),
+            b"MessagingService",
+            b"https://resolver.example.org/api/v1/messages",
         ),
-    )
-    receipt = rotate_key(
-        substrate,
-        account,
-        did_bytes,
-        secondary_key_id,
-        rotated_multikey,
-        rotated_key_suffix,
-        None,
-        rotate_roles,
-        rotate_signature,
-    )
-    log_receipt(receipt)
+        (
+            f"{did}#credentials".encode("utf-8"),
+            b"CredentialRegistry",
+            b"https://wallet.example.org/credentials/status/2026",
+        ),
+        (
+            f"{did}#profile".encode("utf-8"),
+            b"ProfileService",
+            b"https://profiles.example.org/alice",
+        ),
+    ]
+    for service_id, service_type, service_endpoint in services_to_add:
+        add_service_signature = sign(
+            private_key,
+            build_add_service_payload(did_bytes, service_id, service_type, service_endpoint),
+        )
+        receipt = add_service(
+            substrate,
+            account,
+            did_bytes,
+            service_id,
+            service_type,
+            service_endpoint,
+            add_service_signature,
+        )
+        print(f"{LOG_OK} Service added: {service_id.decode('utf-8')}")
+        log_receipt(receipt)
 
-    print(f"{LOG_STEP} Step: set DID metadata")
-    metadata_key = b"profile"
-    metadata_value = b"https://example.com/profile"
-    set_metadata_signature = sign(
-        private_key,
-        build_set_metadata_payload(did_bytes, metadata_key, metadata_value),
-    )
-    receipt = set_metadata(
-        substrate,
-        account,
-        did_bytes,
-        metadata_key,
-        metadata_value,
-        set_metadata_signature,
-    )
-    log_receipt(receipt)
-
-    print(f"{LOG_STEP} Step: add DID service")
-    service_id = DEFAULT_SERVICE_ID
-    service_type = DEFAULT_SERVICE_TYPE
-    service_endpoint = DEFAULT_SERVICE_ENDPOINT
-    add_service_signature = sign(
-        private_key,
-        build_add_service_payload(did_bytes, service_id, service_type, service_endpoint),
-    )
-    receipt = add_service(
-        substrate,
-        account,
-        did_bytes,
-        service_id,
-        service_type,
-        service_endpoint,
-        add_service_signature,
-    )
-    log_receipt(receipt)
-
-    print(f"{LOG_STEP} Step: resolve DID document (after add service)")
+    print(f"{LOG_STEP} Step: resolve final DID document")
     did_resolution = resolve_did(substrate, did)
-    print(f"{LOG_DID} DID resolution:")
+    print(f"{LOG_DID} Final DID resolution:")
     print(json.dumps(did_resolution, indent=2))
-
-    print(f"{LOG_STEP} Step: remove DID service")
-    receipt = remove_service(
-        substrate,
-        account,
-        did_bytes,
-        service_id,
-        sign(private_key, build_remove_service_payload(did_bytes, service_id)),
-    )
-    log_receipt(receipt)
-
-    print(f"{LOG_STEP} Step: remove DID metadata")
-    remove_metadata_signature = sign(
-        private_key,
-        build_remove_metadata_payload(did_bytes, metadata_key),
-    )
-    receipt = remove_metadata(
-        substrate,
-        account,
-        did_bytes,
-        metadata_key,
-        remove_metadata_signature,
-    )
-    log_receipt(receipt)
-
-    print(f"{LOG_STEP} Step: revoke rotated DID key")
-    revoke_key_signature = sign(
-        private_key,
-        build_revoke_key_payload(did_bytes, rotated_key_id),
-    )
-    receipt = revoke_key(
-        substrate,
-        account,
-        did_bytes,
-        rotated_key_id,
-        revoke_key_signature,
-    )
-    log_receipt(receipt)
-
-    print(f"{LOG_STEP} Step: register schema")
-    schema_json = build_schema_json()
-    schema_uri = DEFAULT_SCHEMA_URI
-    schema_id = derive_schema_id(genesis_hash, schema_json)
-    print(f"{LOG_SCHEMA} Schema ID: {schema_id}")
-    schema_signature = sign(private_key, SCHEMA_PREFIX + schema_json)
-    receipt = register_schema(
-        substrate,
-        account,
-        schema_json,
-        schema_uri,
-        did.encode("utf-8"),
-        schema_signature,
-    )
-    log_receipt(receipt)
-
-    print(f"{LOG_STEP} Step: deprecate schema")
-    receipt = deprecate_schema(
-        substrate,
-        account,
-        schema_id.encode("utf-8"),
-        did.encode("utf-8"),
-        schema_signature,
-    )
-    log_receipt(receipt)
-
-    print(f"{LOG_STEP} Step: deactivate DID")
-    deactivate_signature = sign(private_key, build_deactivate_did_payload(did_bytes))
-    receipt = deactivate_did(
-        substrate,
-        account,
-        did_bytes,
-        deactivate_signature,
-    )
-    log_receipt(receipt)
-
-    print(f"{LOG_OK} Done.")
+    print(f"{LOG_OK} Done. DID document above is ready to present.")
 
 
 if __name__ == "__main__":
