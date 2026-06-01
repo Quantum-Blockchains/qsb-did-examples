@@ -51,25 +51,31 @@ const DEFAULT_SCHEMA_URI = 'https://example.com/schema';
 const DEFAULT_SCHEMA_BASE = { name: 'example', version: '1.0' };
 const MULTICODEC_ML_DSA_44 = 0x1210;
 
-function getArgValue(flag) {
-  const args = process.argv.slice(2);
-  const index = args.indexOf(flag);
-  if (index === -1) return null;
-  return args[index + 1] || null;
-}
-
 function readEnvPath(value) {
   if (!value) return null;
   return path.isAbsolute(value) ? value : value;
 }
 
-async function loadAccount(jsonPath) {
+async function createAndStoreAccount(jsonPath, password) {
+  await cryptoWaitReady();
+  const keyring = new Keyring({ type: 'sr25519' });
+  const pair = keyring.addFromUri(Keyring.generateMnemonic());
+  const accountJson = pair.toJson(password);
+  await fs.mkdir(path.dirname(jsonPath), { recursive: true });
+  await fs.writeFile(jsonPath, JSON.stringify(accountJson, null, 2), 'utf-8');
+  return pair;
+}
+
+async function loadOrCreateAccount(jsonPath, password) {
+  try {
+    await fs.access(jsonPath);
+  } catch {
+    console.log(`${LOG_WARN} Account file not found. Creating new account at: ${jsonPath}`);
+    return createAndStoreAccount(jsonPath, password);
+  }
+
   const raw = await fs.readFile(jsonPath, 'utf-8');
   const accountJson = JSON.parse(raw);
-  const password = process.env.ACCOUNT_PASSWORD;
-  if (!password) {
-    throw new Error('ACCOUNT_PASSWORD is required');
-  }
   await cryptoWaitReady();
   const keyring = new Keyring({ type: accountJson.type || 'sr25519' });
   const pair = keyring.addFromJson(accountJson);
@@ -130,18 +136,21 @@ async function main() {
   dotenv.config();
 
   console.log(`${LOG_STEP} Step: load config`);
-  const accountJsonArg = getArgValue('--account-json');
   const accountJsonEnv = readEnvPath(process.env.ACCOUNT_JSON);
-  const accountJsonPath = accountJsonArg || accountJsonEnv;
+  const accountJsonPath = accountJsonEnv;
   if (!accountJsonPath) {
-    throw new Error('Provide --account-json or set ACCOUNT_JSON in .env');
+    throw new Error('Set ACCOUNT_JSON in .env');
+  }
+  const accountPassword = process.env.ACCOUNT_PASSWORD;
+  if (!accountPassword) {
+    throw new Error('Set ACCOUNT_PASSWORD in .env');
   }
 
   console.log(`${LOG_STEP} Step: connect substrate`);
   const api = await createApi('wss://qsb.qbck.io:9945');
 
   console.log(`${LOG_STEP} Step: load account`);
-  const account = await loadAccount(accountJsonPath);
+  const account = await loadOrCreateAccount(accountJsonPath, accountPassword);
   console.log(`${LOG_OK} Loaded account: ${account.address}`);
 
   console.log(`${LOG_STEP} Step: fetch balance`);
