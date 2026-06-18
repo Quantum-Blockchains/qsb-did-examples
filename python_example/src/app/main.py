@@ -16,6 +16,7 @@ from app.substrate_client import (
     add_service,
     create_did,
     create_substrate,
+    did_supports_key_material,
     get_free_balance,
     set_metadata,
 )
@@ -89,6 +90,26 @@ def to_multikey(public_key: bytes, codec: int = MULTICODEC_ML_DSA_44) -> bytes:
     return f"u{encoded}".encode("utf-8")
 
 
+def multikey_material(multikey: bytes) -> dict:
+    return {"Multikey": multikey}
+
+
+def jwk_material(public_key_jwk: bytes) -> dict:
+    return {"Jwk": public_key_jwk}
+
+
+def _scale_key_material(key_material: dict) -> bytes:
+    if "Multikey" in key_material:
+        return b"\x00" + _scale_vec_u8(key_material["Multikey"])
+    if "Jwk" in key_material:
+        return b"\x01" + _scale_vec_u8(key_material["Jwk"])
+    raise ValueError("Unsupported KeyMaterialInput")
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
 def build_create_did_payload(public_key: bytes) -> bytes:
     return DID_CREATE_PREFIX + _scale_vec_u8(public_key)
 
@@ -116,7 +137,7 @@ def _scale_roles(roles: list[str]) -> bytes:
 def build_add_key_payload(
     did_id: bytes,
     key_id_suffix: bytes | None,
-    public_key: bytes,
+    key_material: dict,
     roles: list[str],
     controller: bytes | None,
 ) -> bytes:
@@ -124,7 +145,29 @@ def build_add_key_payload(
         DID_ADD_KEY_PREFIX
         + _scale_vec_u8(did_id)
         + _scale_option_vec_u8(key_id_suffix)
-        + _scale_vec_u8(public_key)
+        + _scale_key_material(key_material)
+        + _scale_roles(roles)
+        + _scale_option_vec_u8(controller)
+    )
+
+
+def build_add_key_payload_for_runtime(
+    supports_key_material: bool,
+    did_id: bytes,
+    key_id_suffix: bytes | None,
+    key_material: dict,
+    roles: list[str],
+    controller: bytes | None,
+) -> bytes:
+    if supports_key_material:
+        return build_add_key_payload(did_id, key_id_suffix, key_material, roles, controller)
+    if "Multikey" not in key_material:
+        raise ValueError("Connected runtime does not support JWK key material")
+    return (
+        DID_ADD_KEY_PREFIX
+        + _scale_vec_u8(did_id)
+        + _scale_option_vec_u8(key_id_suffix)
+        + _scale_vec_u8(key_material["Multikey"])
         + _scale_roles(roles)
         + _scale_option_vec_u8(controller)
     )
@@ -169,6 +212,19 @@ def generate_ed25519_multikey() -> bytes:
     return to_multikey(public_key_raw, MULTICODEC_ED25519_PUB)
 
 
+def generate_ed25519_jwk() -> bytes:
+    private_key = ed25519.Ed25519PrivateKey.generate()
+    public_key = private_key.public_key()
+    public_key_raw = public_key.public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    return json.dumps(
+        {"kty": "OKP", "crv": "Ed25519", "x": _b64url(public_key_raw)},
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
 def generate_p256_multikey() -> bytes:
     private_key = ec.generate_private_key(ec.SECP256R1())
     public_key = private_key.public_key()
@@ -177,6 +233,66 @@ def generate_p256_multikey() -> bytes:
         format=serialization.PublicFormat.CompressedPoint,
     )
     return to_multikey(public_key_compressed, MULTICODEC_P256_PUB)
+
+
+def generate_p256_jwk() -> bytes:
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    public_key = private_key.public_key()
+    numbers = public_key.public_numbers()
+    return json.dumps(
+        {
+            "kty": "EC",
+            "crv": "P-256",
+            "x": _b64url(numbers.x.to_bytes(32, "big")),
+            "y": _b64url(numbers.y.to_bytes(32, "big")),
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def build_demo_key_plan(supports_key_material: bool) -> list[tuple[bytes, list[str], dict]]:
+    if supports_key_material:
+        return [
+            (
+                b"#auth-mldsa44",
+                ["Authentication"],
+                multikey_material(to_multikey(generate_keypair()[0])),
+            ),
+            (
+                b"#invocation-mldsa44",
+                ["CapabilityInvocation"],
+                multikey_material(to_multikey(generate_keypair()[0])),
+            ),
+            (b"#assertion-ed25519-jwk", ["AssertionMethod"], jwk_material(generate_ed25519_jwk())),
+            (
+                b"#agreement-p256-jwk",
+                ["KeyAgreement", "CapabilityDelegation"],
+                jwk_material(generate_p256_jwk()),
+            ),
+        ]
+
+    return [
+        (
+            b"#auth-mldsa44",
+            ["Authentication"],
+            multikey_material(to_multikey(generate_keypair()[0])),
+        ),
+        (
+            b"#invocation-mldsa44",
+            ["CapabilityInvocation"],
+            multikey_material(to_multikey(generate_keypair()[0])),
+        ),
+        (
+            b"#assertion-ed25519",
+            ["AssertionMethod"],
+            multikey_material(generate_ed25519_multikey()),
+        ),
+        (
+            b"#agreement-p256",
+            ["KeyAgreement", "CapabilityDelegation"],
+            multikey_material(generate_p256_multikey()),
+        ),
+    ]
 
 
 def main() -> None:
@@ -202,6 +318,7 @@ def main() -> None:
 
     print(f"{LOG_STEP} Step: load or generate DID keys")
     stored = load_did_keys()
+    loaded_from_store = stored is not None
     if stored:
         did, public_key, private_key = stored
         print(f"{LOG_DID} DID: {did}")
@@ -229,29 +346,52 @@ def main() -> None:
         genesis_hash = substrate.get_block_hash(0)
     print(f"{LOG_STEP} Step: resolve DID document")
     did_resolution = resolve_did(substrate, did)
+    resolution_error = did_resolution["didResolutionMetadata"].get("error")
+    if resolution_error == "runtimeApiDecodeError" and loaded_from_store:
+        store_path = os.getenv("DID_STORE_PATH", "did_store.json")
+        raise SystemExit(
+            "Stored DID cannot be decoded by the current node runtime API. "
+            "This usually means the local did_store.json points to a DID created "
+            "with an older pallet storage layout. Remove the local DID store or set "
+            f"DID_STORE_PATH to a new file and run again. Current DID_STORE_PATH: {store_path}"
+        )
+    if resolution_error == "runtimeApiDecodeError":
+        raise SystemExit(
+            "Newly created DID cannot be decoded by did_getByString. "
+            "The connected RPC node likely does not match the runtime/API expected "
+            "by this example."
+        )
     print(f"{LOG_DID} DID resolution:")
     print(json.dumps(did_resolution, indent=2))
 
     did_bytes = did.encode("utf-8")
+    supports_key_material = did_supports_key_material(substrate)
 
     print(f"{LOG_STEP} Step: add DID keys for different roles")
-    keys_to_add = [
-        (b"#auth-mldsa44", ["Authentication"], to_multikey(generate_keypair()[0])),
-        (b"#invocation-mldsa44", ["CapabilityInvocation"], to_multikey(generate_keypair()[0])),
-        (b"#assertion-ed25519", ["AssertionMethod"], generate_ed25519_multikey()),
-        (b"#agreement-p256", ["KeyAgreement", "CapabilityDelegation"], generate_p256_multikey()),
-    ]
-    for key_suffix, roles, role_multikey in keys_to_add:
+    if not supports_key_material:
+        print(
+            f"{LOG_WARN} Connected runtime does not expose KeyMaterialInput; "
+            "JWK demo keys are skipped and Multikey is used for all added keys."
+        )
+    keys_to_add = build_demo_key_plan(supports_key_material)
+    for key_suffix, roles, key_material in keys_to_add:
         add_key_signature = sign(
             private_key,
-            build_add_key_payload(did_bytes, key_suffix, role_multikey, roles, None),
+            build_add_key_payload_for_runtime(
+                supports_key_material,
+                did_bytes,
+                key_suffix,
+                key_material,
+                roles,
+                None,
+            ),
         )
         receipt = add_key(
             substrate,
             account,
             did_bytes,
             key_suffix,
-            role_multikey,
+            key_material,
             roles,
             None,
             add_key_signature,

@@ -5,6 +5,25 @@ function toBytesArg(value) {
   return Array.from(value);
 }
 
+function callArgNames(api, section, method) {
+  const call = api.tx?.[section]?.[method];
+  return call?.meta?.args?.map((arg) => arg.name.toString()) ?? [];
+}
+
+function normalizeName(name) {
+  return name.replace(/_/g, '').toLowerCase();
+}
+
+export function didSupportsKeyMaterial(api) {
+  return callArgNames(api, 'did', 'addKey').some((name) => normalizeName(name) === 'keymaterial');
+}
+
+export function materialForRuntime(api, keyMaterial) {
+  if (didSupportsKeyMaterial(api)) return keyMaterial;
+  if (keyMaterial?.Multikey) return keyMaterial.Multikey;
+  throw new Error('Connected runtime does not support JWK key material');
+}
+
 export async function createApi(url) {
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
   const provider = new WsProvider(url);
@@ -44,15 +63,16 @@ export async function addKey(
   account,
   didId,
   keyIdSuffix,
-  publicKey,
+  keyMaterial,
   roles,
   controller,
   didSignature
 ) {
+  const material = materialForRuntime(api, keyMaterial);
   const tx = api.tx.did.addKey(
     toBytesArg(didId),
     keyIdSuffix == null ? null : toBytesArg(keyIdSuffix),
-    toBytesArg(publicKey),
+    material,
     roles,
     controller == null ? null : toBytesArg(controller),
     toBytesArg(didSignature)
@@ -124,16 +144,17 @@ export async function rotateKey(
   account,
   didId,
   oldKeyId,
-  newPublicKey,
+  newKeyMaterial,
   newKeyIdSuffix,
   newController,
   roles,
   didSignature
 ) {
+  const material = materialForRuntime(api, newKeyMaterial);
   const tx = api.tx.did.rotateKey(
     toBytesArg(didId),
     toBytesArg(oldKeyId),
-    toBytesArg(newPublicKey),
+    material,
     newKeyIdSuffix == null ? null : toBytesArg(newKeyIdSuffix),
     newController == null ? null : toBytesArg(newController),
     roles,

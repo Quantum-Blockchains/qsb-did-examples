@@ -4,7 +4,9 @@ Example client for QSB DID + Schema pallets.
 
 Current demo flow includes:
 - DID create
-- key operations (`add_key`, `update_roles`, `rotate_key`, `revoke_key`)
+- key operations with current `KeyMaterialInput` calls, or legacy
+  Multikey-only calls when the connected runtime still exposes `public_key`
+  arguments (`add_key`, `update_roles`, `rotate_key`, `revoke_key`)
 - metadata operations (`set_metadata`, `remove_metadata`)
 - service operations (`add_service`, `remove_service`)
 - DID deactivation
@@ -48,6 +50,21 @@ Notes:
 - `ACCOUNT_JSON` and `ACCOUNT_PASSWORD` are required in `.env`.
 - If `ACCOUNT_JSON` does not exist, the app creates a new encrypted account JSON at that path.
 - `DID_STORE_PASSWORD` is used to encrypt the DID private key stored on disk.
+- DID creation sends a Multikey ML-DSA-44 value, as required by the current pallet.
+- Added DID keys are mixed on runtimes that expose `KeyMaterialInput`: half of
+  the demo-added key material is JWK and half is Multikey. If the connected
+  runtime still exposes legacy `public_key` arguments, the demo skips JWK and
+  uses Multikey for added keys.
+- JWK verification methods are emitted as `JsonWebKey2020` with
+  `publicKeyJwk`; Multikey methods are emitted as `Multikey` with
+  `publicKeyMultibase`.
+- If `did_getByString` reports a runtime decode error for an existing DID, remove
+  `storage/did_store.json` or point `DID_STORE_PATH` to a new file. That local
+  store may reference a DID created before the current pallet storage layout.
+- If the stored DID is already deactivated, also remove `storage/did_store.json`
+  or point `DID_STORE_PATH` to a new file before running the full lifecycle again.
+- DID resolution first tries `did_getByString`; if that RPC cannot decode the
+  current runtime return type, the example falls back to `Did.DidRecords`.
 - Schema and service demo values are hardcoded in `src/app/main.py` (`DEFAULT_SCHEMA_URI`, `DEFAULT_SERVICE_*`).
 - TLS verification is hardcoded as insecure in `src/app/substrate_client.py` for demo compatibility.
 

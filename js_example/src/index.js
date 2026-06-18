@@ -1,10 +1,9 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import { Keyring } from '@polkadot/keyring';
-import { cryptoWaitReady } from '@polkadot/util-crypto';
+import { cryptoWaitReady, mnemonicGenerate } from '@polkadot/util-crypto';
 import { ml_dsa44 } from '@noble/post-quantum/ml-dsa';
 import { randomBytes } from '@noble/post-quantum/utils';
 
@@ -18,7 +17,9 @@ import {
   createDid,
   deactivateDid,
   deprecateSchema,
+  didSupportsKeyMaterial,
   getFreeBalance,
+  materialForRuntime,
   registerSchema,
   removeMetadata,
   removeService,
@@ -44,22 +45,17 @@ const DID_SET_METADATA_PREFIX = 'QSB_DID_SET_METADATA';
 const DID_REMOVE_METADATA_PREFIX = 'QSB_DID_REMOVE_METADATA';
 const DID_ROTATE_KEY_PREFIX = 'QSB_DID_ROTATE_KEY';
 const DID_UPDATE_ROLES_PREFIX = 'QSB_DID_UPDATE_ROLES';
-const DEFAULT_SERVICE_ID = 'service-1';
+const DEFAULT_SERVICE_ID = '#service-1';
 const DEFAULT_SERVICE_TYPE = 'ExampleService';
 const DEFAULT_SERVICE_ENDPOINT = 'https://example.com';
 const DEFAULT_SCHEMA_URI = 'https://example.com/schema';
 const DEFAULT_SCHEMA_BASE = { name: 'example', version: '1.0' };
 const MULTICODEC_ML_DSA_44 = 0x1210;
 
-function readEnvPath(value) {
-  if (!value) return null;
-  return path.isAbsolute(value) ? value : value;
-}
-
 async function createAndStoreAccount(jsonPath, password) {
   await cryptoWaitReady();
   const keyring = new Keyring({ type: 'sr25519' });
-  const pair = keyring.addFromUri(Keyring.generateMnemonic());
+  const pair = keyring.addFromUri(mnemonicGenerate());
   const accountJson = pair.toJson(password);
   await fs.mkdir(path.dirname(jsonPath), { recursive: true });
   await fs.writeFile(jsonPath, JSON.stringify(accountJson, null, 2), 'utf-8');
@@ -119,6 +115,31 @@ function toMultikey(publicKey, codec = MULTICODEC_ML_DSA_44) {
   return `u${Buffer.from(prefixed).toString('base64url')}`;
 }
 
+function toMultikeyMaterial(multikeyBytes) {
+  return { Multikey: toBytesArg(multikeyBytes) };
+}
+
+function toJwkMaterial(jwkBytes) {
+  return { Jwk: toBytesArg(jwkBytes) };
+}
+
+function generateMlDsa44MultikeyMaterial() {
+  const keys = ml_dsa44.keygen(randomBytes(32));
+  const publicKey = keys.publicKey ?? keys[0];
+  return toMultikeyMaterial(toBytes(toMultikey(publicKey)));
+}
+
+function generateJwkBytes(kind) {
+  const options =
+    kind === 'p256'
+      ? ['ec', { namedCurve: 'P-256' }]
+      : ['ed25519', undefined];
+  const { publicKey } = options[1]
+    ? crypto.generateKeyPairSync(options[0], options[1])
+    : crypto.generateKeyPairSync(options[0]);
+  return toBytes(JSON.stringify(publicKey.export({ format: 'jwk' })));
+}
+
 function buildDidPayload(prefix, call) {
   const encodedArgs = call.method.args
     .slice(0, Math.max(0, call.method.args.length - 1))
@@ -132,12 +153,17 @@ function signDidCall(privateKey, prefix, call) {
   return ml_dsa44.sign(privateKey, payload);
 }
 
+function ensureExtrinsicSuccess(result, label) {
+  if (result.dispatchError) {
+    throw new Error(`${label} failed: ${result.dispatchError.toString()}`);
+  }
+}
+
 async function main() {
   dotenv.config();
 
   console.log(`${LOG_STEP} Step: load config`);
-  const accountJsonEnv = readEnvPath(process.env.ACCOUNT_JSON);
-  const accountJsonPath = accountJsonEnv;
+  const accountJsonPath = process.env.ACCOUNT_JSON;
   if (!accountJsonPath) {
     throw new Error('Set ACCOUNT_JSON in .env');
   }
@@ -148,6 +174,7 @@ async function main() {
 
   console.log(`${LOG_STEP} Step: connect substrate`);
   const api = await createApi('wss://qsb.qbck.io:9945');
+  const supportsKeyMaterial = didSupportsKeyMaterial(api);
 
   console.log(`${LOG_STEP} Step: load account`);
   const account = await loadOrCreateAccount(accountJsonPath, accountPassword);
@@ -162,6 +189,7 @@ async function main() {
   let publicKey;
   let privateKey;
   const stored = await loadDidKeys();
+  const loadedFromStore = stored != null;
   if (stored) {
     did = stored.did;
     publicKey = stored.publicKey;
@@ -195,21 +223,33 @@ async function main() {
   const didResolution = await resolveDid(api, did);
   console.log(`${LOG_DID} DID resolution:`);
   console.log(JSON.stringify(didResolution, null, 2));
+  if (loadedFromStore && didResolution.didDocumentMetadata.deactivated) {
+    throw new Error(
+      'Stored DID is deactivated. Remove storage/did_store.json or set DID_STORE_PATH to a new file.'
+    );
+  }
 
   const didId = toBytes(did);
   const didIdArg = toBytesArg(didId);
 
   console.log(`${LOG_STEP} Step: add DID key (assertion method)`);
-  const secondary = ml_dsa44.keygen(randomBytes(32));
-  const secondaryPublicKey = secondary.publicKey ?? secondary[0];
-  const secondaryMultikey = toBytes(toMultikey(secondaryPublicKey));
-  const secondaryKeySuffix = toBytes('#key-1');
-  const secondaryKeyId = toBytes(`${did}#key-1`);
+  if (!supportsKeyMaterial) {
+    console.log(
+      `${LOG_WARN} Connected runtime does not expose KeyMaterialInput; ` +
+        'JWK demo keys are skipped and Multikey is used for added keys.'
+    );
+  }
+  const secondaryKeySuffixText = supportsKeyMaterial ? '#jwk-1' : '#key-1';
+  const secondaryKeyMaterial = supportsKeyMaterial
+    ? toJwkMaterial(generateJwkBytes('ed25519'))
+    : generateMlDsa44MultikeyMaterial();
+  const secondaryKeySuffix = toBytes(secondaryKeySuffixText);
+  const secondaryKeyId = toBytes(`${did}${secondaryKeySuffixText}`);
   const addKeyRoles = ['AssertionMethod'];
   const addKeyCall = api.tx.did.addKey(
     didIdArg,
     toBytesArg(secondaryKeySuffix),
-    toBytesArg(secondaryMultikey),
+    materialForRuntime(api, secondaryKeyMaterial),
     addKeyRoles,
     null,
     []
@@ -220,15 +260,16 @@ async function main() {
     account,
     didIdArg,
     secondaryKeySuffix,
-    secondaryMultikey,
+    secondaryKeyMaterial,
     addKeyRoles,
     null,
     addKeySignature
   );
   logReceipt(result);
+  ensureExtrinsicSuccess(result, 'addKey');
 
   console.log(`${LOG_STEP} Step: update DID key roles`);
-  const updatedRoles = ['CapabilityInvocation'];
+  const updatedRoles = ['AssertionMethod', 'Authentication'];
   const updateRolesCall = api.tx.did.updateRoles(
     didIdArg,
     toBytesArg(secondaryKeyId),
@@ -245,18 +286,20 @@ async function main() {
     updateRolesSignature
   );
   logReceipt(result);
+  ensureExtrinsicSuccess(result, 'updateRoles');
 
   console.log(`${LOG_STEP} Step: rotate DID key`);
   const rotated = ml_dsa44.keygen(randomBytes(32));
   const rotatedPublicKey = rotated.publicKey ?? rotated[0];
   const rotatedMultikey = toBytes(toMultikey(rotatedPublicKey));
+  const rotatedKeyMaterial = toMultikeyMaterial(rotatedMultikey);
   const rotatedKeySuffix = toBytes('#key-2');
   const rotatedKeyId = toBytes(`${did}#key-2`);
   const rotateRoles = ['CapabilityDelegation'];
   const rotateKeyCall = api.tx.did.rotateKey(
     didIdArg,
     toBytesArg(secondaryKeyId),
-    toBytesArg(rotatedMultikey),
+    materialForRuntime(api, rotatedKeyMaterial),
     toBytesArg(rotatedKeySuffix),
     null,
     rotateRoles,
@@ -268,13 +311,53 @@ async function main() {
     account,
     didIdArg,
     secondaryKeyId,
-    rotatedMultikey,
+    rotatedKeyMaterial,
     rotatedKeySuffix,
     null,
     rotateRoles,
     rotateKeySignature
   );
   logReceipt(result);
+  ensureExtrinsicSuccess(result, 'rotateKey');
+
+  console.log(`${LOG_STEP} Step: add additional DID keys`);
+  const mixedKeys = [
+    {
+      suffix: toBytes('#key-3'),
+      material: generateMlDsa44MultikeyMaterial(),
+      roles: ['Authentication'],
+    },
+    {
+      suffix: toBytes(supportsKeyMaterial ? '#jwk-2' : '#key-4'),
+      material: supportsKeyMaterial
+        ? toJwkMaterial(generateJwkBytes('p256'))
+        : generateMlDsa44MultikeyMaterial(),
+      roles: ['KeyAgreement'],
+    },
+  ];
+  for (const item of mixedKeys) {
+    const addMixedKeyCall = api.tx.did.addKey(
+      didIdArg,
+      toBytesArg(item.suffix),
+      materialForRuntime(api, item.material),
+      item.roles,
+      null,
+      []
+    );
+    const addMixedKeySignature = signDidCall(privateKey, DID_ADD_KEY_PREFIX, addMixedKeyCall);
+    result = await addKey(
+      api,
+      account,
+      didIdArg,
+      item.suffix,
+      item.material,
+      item.roles,
+      null,
+      addMixedKeySignature
+    );
+    logReceipt(result);
+    ensureExtrinsicSuccess(result, 'addKey');
+  }
 
   console.log(`${LOG_STEP} Step: set DID metadata`);
   const metadataKey = toBytes('profile');
@@ -294,6 +377,7 @@ async function main() {
     setMetadataSignature
   );
   logReceipt(result);
+  ensureExtrinsicSuccess(result, 'setMetadata');
 
   console.log(`${LOG_STEP} Step: add DID service`);
   const serviceId = toBytes(DEFAULT_SERVICE_ID);
@@ -321,6 +405,7 @@ async function main() {
     addServiceSignature
   );
   logReceipt(result);
+  ensureExtrinsicSuccess(result, 'addService');
 
   console.log(`${LOG_STEP} Step: resolve DID document (after add service)`);
   const didResolution2 = await resolveDid(api, did);
@@ -335,6 +420,7 @@ async function main() {
   );
   result = await removeService(api, account, didIdArg, serviceIdArg, removeServiceSignature);
   logReceipt(result);
+  ensureExtrinsicSuccess(result, 'removeService');
 
   console.log(`${LOG_STEP} Step: remove DID metadata`);
   const removeMetadataCall = api.tx.did.removeMetadata(didIdArg, toBytesArg(metadataKey), []);
@@ -345,12 +431,14 @@ async function main() {
   );
   result = await removeMetadata(api, account, didIdArg, metadataKey, removeMetadataSignature);
   logReceipt(result);
+  ensureExtrinsicSuccess(result, 'removeMetadata');
 
   console.log(`${LOG_STEP} Step: revoke rotated DID key`);
   const revokeKeyCall = api.tx.did.revokeKey(didIdArg, toBytesArg(rotatedKeyId), []);
   const revokeKeySignature = signDidCall(privateKey, DID_REVOKE_KEY_PREFIX, revokeKeyCall);
   result = await revokeKey(api, account, didIdArg, rotatedKeyId, revokeKeySignature);
   logReceipt(result);
+  ensureExtrinsicSuccess(result, 'revokeKey');
 
   console.log(`${LOG_STEP} Step: register schema`);
   const schemaJsonRaw = buildSchemaJson();
@@ -368,6 +456,7 @@ async function main() {
     schemaSignature
   );
   logReceipt(result);
+  ensureExtrinsicSuccess(result, 'registerSchema');
 
   console.log(`${LOG_STEP} Step: deprecate schema`);
   result = await deprecateSchema(
@@ -378,6 +467,7 @@ async function main() {
     schemaSignature
   );
   logReceipt(result);
+  ensureExtrinsicSuccess(result, 'deprecateSchema');
 
   console.log(`${LOG_STEP} Step: deactivate DID`);
   const deactivateDidCall = api.tx.did.deactivateDid(didIdArg, []);
@@ -388,6 +478,7 @@ async function main() {
   );
   result = await deactivateDid(api, account, didIdArg, deactivateDidSignature);
   logReceipt(result);
+  ensureExtrinsicSuccess(result, 'deactivateDid');
 
   console.log(`${LOG_OK} Done.`);
   await api.disconnect();

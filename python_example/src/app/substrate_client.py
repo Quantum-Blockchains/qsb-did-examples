@@ -15,6 +15,21 @@ def get_free_balance(substrate: SubstrateInterface, address: str) -> int:
     return account_info.value["data"]["free"]
 
 
+def _call_field_names(substrate: SubstrateInterface, call_function: str) -> list[str]:
+    metadata = substrate.get_metadata_call_function("Did", call_function)
+    return [field["name"] for field in metadata["fields"]]
+
+
+def did_supports_key_material(substrate: SubstrateInterface) -> bool:
+    return "key_material" in _call_field_names(substrate, "add_key")
+
+
+def _material_to_legacy_public_key(key_material: dict) -> bytes:
+    if "Multikey" in key_material:
+        return key_material["Multikey"]
+    raise ValueError("Connected runtime does not support JWK key material")
+
+
 def create_did(substrate: SubstrateInterface, account, public_key: bytes, did_signature: bytes):
     call = substrate.compose_call(
         call_module="Did",
@@ -33,18 +48,24 @@ def add_key(
     account,
     did_id: bytes,
     key_id_suffix: bytes | None,
-    public_key: bytes,
+    key_material: dict,
     roles: list[str],
     controller: bytes | None,
     did_signature: bytes,
 ):
+    supports_key_material = did_supports_key_material(substrate)
+    material_param = (
+        {"key_material": key_material}
+        if supports_key_material
+        else {"public_key": _material_to_legacy_public_key(key_material)}
+    )
     call = substrate.compose_call(
         call_module="Did",
         call_function="add_key",
         call_params={
             "did_id": did_id,
             "key_id_suffix": key_id_suffix,
-            "public_key": public_key,
+            **material_param,
             "roles": roles,
             "controller": controller,
             "did_signature": did_signature,
@@ -229,19 +250,25 @@ def rotate_key(
     account,
     did_id: bytes,
     old_key_id: bytes,
-    new_public_key: bytes,
+    new_key_material: dict,
     new_key_id_suffix: bytes | None,
     new_controller: bytes | None,
     roles: list[str],
     did_signature: bytes,
 ):
+    supports_key_material = did_supports_key_material(substrate)
+    material_param = (
+        {"new_key_material": new_key_material}
+        if supports_key_material
+        else {"new_public_key": _material_to_legacy_public_key(new_key_material)}
+    )
     call = substrate.compose_call(
         call_module="Did",
         call_function="rotate_key",
         call_params={
             "did_id": did_id,
             "old_key_id": old_key_id,
-            "new_public_key": new_public_key,
+            **material_param,
             "new_key_id_suffix": new_key_id_suffix,
             "new_controller": new_controller,
             "roles": roles,
