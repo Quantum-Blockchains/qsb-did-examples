@@ -21,6 +21,10 @@ The DID examples use:
 - `did_getByString` for raw DID state lookup, with direct `Did.DidRecords`
   storage fallback in the example resolvers.
 
-Both examples run a full lifecycle demo and deactivate the DID near the end.
-For another full run, remove the configured `DID_STORE_PATH` file or point it to
-a new path.
+Both examples run the same DID lifecycle demo (create/reuse DID, add keys,
+metadata, services) and leave the DID active afterward — it is not
+deactivated, so the same DID can be reused across runs and by the
+credential-signing demo (`credential-demo` script in each example, see the
+per-example README). For a completely fresh DID instead of reusing the
+stored one, remove the configured `DID_STORE_PATH` file or point it to a new
+path.

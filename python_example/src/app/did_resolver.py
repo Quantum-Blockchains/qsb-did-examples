@@ -26,6 +26,29 @@ def to_multikey(public_key: bytes, codec: int | None) -> str:
     return f"u{encoded}"
 
 
+def decode_uvarint(data: bytes) -> tuple[int, int]:
+    value = 0
+    shift = 0
+    for i, byte in enumerate(data):
+        value |= (byte & 0x7F) << shift
+        if not (byte & 0x80):
+            return value, i + 1
+        shift += 7
+    raise ValueError("Invalid uvarint")
+
+
+def from_multikey(multikey: str) -> tuple[int | None, bytes]:
+    if multikey.startswith("z"):
+        return None, base58.b58decode(multikey[1:])
+    if not multikey.startswith("u"):
+        raise ValueError("Unsupported multibase prefix")
+    body = multikey[1:]
+    padded = body + "=" * (-len(body) % 4)
+    raw = base64.urlsafe_b64decode(padded)
+    codec, offset = decode_uvarint(raw)
+    return codec, raw[offset:]
+
+
 def _bytes(value) -> bytes:
     if value is None:
         return b""

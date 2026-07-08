@@ -10,7 +10,7 @@ from pqcrypto.sign.ml_dsa_44 import generate_keypair, sign
 from substrateinterface import Keypair
 
 from app.did_resolver import resolve_did
-from app.did_store import load_did_keys, store_did_keys
+from app.did_store import load_did_keys, store_did_keys, store_key
 from app.substrate_client import (
     add_key,
     add_service,
@@ -202,23 +202,33 @@ def load_or_create_account(json_path: str, password: str) -> Keypair:
         raise RuntimeError("Failed to load account from JSON") from exc
 
 
-def generate_ed25519_multikey() -> bytes:
+def generate_ed25519_keypair() -> tuple[bytes, bytes]:
     private_key = ed25519.Ed25519PrivateKey.generate()
-    public_key = private_key.public_key()
-    public_key_raw = public_key.public_bytes(
+    public_key_raw = private_key.public_key().public_bytes(
         encoding=serialization.Encoding.Raw,
         format=serialization.PublicFormat.Raw,
     )
+    private_key_raw = private_key.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    return public_key_raw, private_key_raw
+
+
+def generate_p256_keypair() -> tuple[ec.EllipticCurvePublicKey, bytes]:
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    private_key_raw = private_key.private_numbers().private_value.to_bytes(32, "big")
+    return private_key.public_key(), private_key_raw
+
+
+def generate_ed25519_multikey() -> bytes:
+    public_key_raw, _private_key_raw = generate_ed25519_keypair()
     return to_multikey(public_key_raw, MULTICODEC_ED25519_PUB)
 
 
 def generate_ed25519_jwk() -> bytes:
-    private_key = ed25519.Ed25519PrivateKey.generate()
-    public_key = private_key.public_key()
-    public_key_raw = public_key.public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
-    )
+    public_key_raw, _private_key_raw = generate_ed25519_keypair()
     return json.dumps(
         {"kty": "OKP", "crv": "Ed25519", "x": _b64url(public_key_raw)},
         separators=(",", ":"),
@@ -226,8 +236,7 @@ def generate_ed25519_jwk() -> bytes:
 
 
 def generate_p256_multikey() -> bytes:
-    private_key = ec.generate_private_key(ec.SECP256R1())
-    public_key = private_key.public_key()
+    public_key, _private_key_raw = generate_p256_keypair()
     public_key_compressed = public_key.public_bytes(
         encoding=serialization.Encoding.X962,
         format=serialization.PublicFormat.CompressedPoint,
@@ -236,8 +245,7 @@ def generate_p256_multikey() -> bytes:
 
 
 def generate_p256_jwk() -> bytes:
-    private_key = ec.generate_private_key(ec.SECP256R1())
-    public_key = private_key.public_key()
+    public_key, _private_key_raw = generate_p256_keypair()
     numbers = public_key.public_numbers()
     return json.dumps(
         {
@@ -250,47 +258,101 @@ def generate_p256_jwk() -> bytes:
     ).encode("utf-8")
 
 
-def build_demo_key_plan(supports_key_material: bool) -> list[tuple[bytes, list[str], dict]]:
+def build_demo_key_plan(
+    supports_key_material: bool,
+) -> list[tuple[bytes, list[str], dict, bytes, bytes]]:
+    auth_public, auth_private = generate_keypair()
+    invocation_public, invocation_private = generate_keypair()
+
     if supports_key_material:
+        assertion_public, assertion_private = generate_ed25519_keypair()
+        assertion_jwk = json.dumps(
+            {"kty": "OKP", "crv": "Ed25519", "x": _b64url(assertion_public)},
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        agreement_public_key, agreement_private = generate_p256_keypair()
+        agreement_numbers = agreement_public_key.public_numbers()
+        agreement_public = agreement_public_key.public_bytes(
+            encoding=serialization.Encoding.X962,
+            format=serialization.PublicFormat.CompressedPoint,
+        )
+        agreement_jwk = json.dumps(
+            {
+                "kty": "EC",
+                "crv": "P-256",
+                "x": _b64url(agreement_numbers.x.to_bytes(32, "big")),
+                "y": _b64url(agreement_numbers.y.to_bytes(32, "big")),
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+
         return [
             (
                 b"#auth-mldsa44",
                 ["Authentication"],
-                multikey_material(to_multikey(generate_keypair()[0])),
+                multikey_material(to_multikey(auth_public)),
+                auth_public,
+                auth_private,
             ),
             (
                 b"#invocation-mldsa44",
                 ["CapabilityInvocation"],
-                multikey_material(to_multikey(generate_keypair()[0])),
+                multikey_material(to_multikey(invocation_public)),
+                invocation_public,
+                invocation_private,
             ),
-            (b"#assertion-ed25519-jwk", ["AssertionMethod"], jwk_material(generate_ed25519_jwk())),
+            (
+                b"#assertion-ed25519-jwk",
+                ["AssertionMethod"],
+                jwk_material(assertion_jwk),
+                assertion_public,
+                assertion_private,
+            ),
             (
                 b"#agreement-p256-jwk",
                 ["KeyAgreement", "CapabilityDelegation"],
-                jwk_material(generate_p256_jwk()),
+                jwk_material(agreement_jwk),
+                agreement_public,
+                agreement_private,
             ),
         ]
+
+    assertion_public, assertion_private = generate_ed25519_keypair()
+    agreement_public_key, agreement_private = generate_p256_keypair()
+    agreement_public = agreement_public_key.public_bytes(
+        encoding=serialization.Encoding.X962,
+        format=serialization.PublicFormat.CompressedPoint,
+    )
 
     return [
         (
             b"#auth-mldsa44",
             ["Authentication"],
-            multikey_material(to_multikey(generate_keypair()[0])),
+            multikey_material(to_multikey(auth_public)),
+            auth_public,
+            auth_private,
         ),
         (
             b"#invocation-mldsa44",
             ["CapabilityInvocation"],
-            multikey_material(to_multikey(generate_keypair()[0])),
+            multikey_material(to_multikey(invocation_public)),
+            invocation_public,
+            invocation_private,
         ),
         (
             b"#assertion-ed25519",
             ["AssertionMethod"],
-            multikey_material(generate_ed25519_multikey()),
+            multikey_material(to_multikey(assertion_public, MULTICODEC_ED25519_PUB)),
+            assertion_public,
+            assertion_private,
         ),
         (
             b"#agreement-p256",
             ["KeyAgreement", "CapabilityDelegation"],
-            multikey_material(generate_p256_multikey()),
+            multikey_material(to_multikey(agreement_public, MULTICODEC_P256_PUB)),
+            agreement_public,
+            agreement_private,
         ),
     ]
 
@@ -374,7 +436,7 @@ def main() -> None:
             "JWK demo keys are skipped and Multikey is used for all added keys."
         )
     keys_to_add = build_demo_key_plan(supports_key_material)
-    for key_suffix, roles, key_material in keys_to_add:
+    for key_suffix, roles, key_material, public_key_raw, private_key_raw in keys_to_add:
         add_key_signature = sign(
             private_key,
             build_add_key_payload_for_runtime(
@@ -396,8 +458,15 @@ def main() -> None:
             None,
             add_key_signature,
         )
-        print(f"{LOG_DID} Added key {did}{key_suffix.decode('utf-8')} roles={roles}")
         log_receipt(receipt)
+        is_success = getattr(receipt, "is_success", None)
+        if is_success is None:
+            is_success = getattr(receipt, "success", False)
+        if not is_success:
+            print(f"{LOG_WARN} add_key failed for {key_suffix.decode('utf-8')}; not saving to did_store")
+            continue
+        print(f"{LOG_DID} Added key {did}{key_suffix.decode('utf-8')} roles={roles}")
+        store_key(did, key_suffix.decode("utf-8"), public_key_raw, private_key_raw)
 
     print(f"{LOG_STEP} Step: add DID metadata")
     metadata_entries = [
