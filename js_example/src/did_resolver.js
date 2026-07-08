@@ -80,7 +80,7 @@ function toMultikey(publicKey, codec) {
   return `u${Buffer.from(out).toString('base64url')}`;
 }
 
-function decodeMultikey(value) {
+export function decodeMultikey(value) {
   const decodedValue = decodeStoredBytes(value);
   const text = typeof decodedValue === 'string' ? decodedValue : toString(decodedValue);
   if (!text.startsWith('u')) {

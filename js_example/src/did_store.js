@@ -42,12 +42,22 @@ export function decryptPrivateKey(encrypted, password, salt, ivHex, tagHex) {
   ]);
 }
 
-export async function storeDidKeys(did, publicKey, privateKey) {
-  const storePath = getStorePath();
+function getPassword() {
   const password = process.env.DID_STORE_PASSWORD;
   if (!password) {
     throw new Error('DID_STORE_PASSWORD is required');
   }
+  return password;
+}
+
+async function readStoreRecord(storePath) {
+  const raw = await fs.readFile(storePath, 'utf-8');
+  return JSON.parse(raw);
+}
+
+export async function storeDidKeys(did, publicKey, privateKey) {
+  const storePath = getStorePath();
+  const password = getPassword();
   const salt = crypto.randomBytes(16);
   const { encrypted, iv, tag } = encryptPrivateKey(privateKey, password, salt);
   const record = {
@@ -66,12 +76,8 @@ export async function storeDidKeys(did, publicKey, privateKey) {
 export async function loadDidKeys() {
   const storePath = getStorePath();
   if (!existsSync(storePath)) return null;
-  const password = process.env.DID_STORE_PASSWORD;
-  if (!password) {
-    throw new Error('DID_STORE_PASSWORD is required');
-  }
-  const raw = await fs.readFile(storePath, 'utf-8');
-  const record = JSON.parse(raw);
+  const password = getPassword();
+  const record = await readStoreRecord(storePath);
   const salt = Buffer.from(record.salt_hex, 'hex');
   const privateKey = decryptPrivateKey(
     record.private_key_enc,
@@ -87,4 +93,46 @@ export async function loadDidKeys() {
     publicKey,
     privateKey,
   };
+}
+
+export async function storeKey(did, keyId, publicKey, privateKey) {
+  const storePath = getStorePath();
+  const password = getPassword();
+  const record = existsSync(storePath) ? await readStoreRecord(storePath) : { did };
+  const salt = crypto.randomBytes(16);
+  const { encrypted, iv, tag } = encryptPrivateKey(privateKey, password, salt);
+  const entry = {
+    key_id: keyId,
+    public_key_hex: Buffer.from(publicKey).toString('hex'),
+    private_key_enc: encrypted,
+    salt_hex: salt.toString('hex'),
+    iv_hex: iv,
+    tag_hex: tag,
+    kdf: 'pbkdf2_sha256_390000',
+  };
+  const keys = (record.keys || []).filter((k) => k.key_id !== keyId);
+  keys.push(entry);
+  record.keys = keys;
+  await fs.writeFile(storePath, JSON.stringify(record, null, 2));
+  console.log(`${LOG_OK} Key ${keyId} saved to ${storePath}`);
+}
+
+export async function loadKey(keyId) {
+  const storePath = getStorePath();
+  if (!existsSync(storePath)) return null;
+  const record = await readStoreRecord(storePath);
+  const entry = (record.keys || []).find((k) => k.key_id === keyId);
+  if (!entry) return null;
+  const password = getPassword();
+  const salt = Buffer.from(entry.salt_hex, 'hex');
+  const privateKey = decryptPrivateKey(
+    entry.private_key_enc,
+    password,
+    salt,
+    entry.iv_hex,
+    entry.tag_hex
+  );
+  const publicKey = Buffer.from(entry.public_key_hex, 'hex');
+  console.log(`${LOG_OK} Key ${keyId} loaded from ${storePath}`);
+  return { publicKey, privateKey };
 }

@@ -4,7 +4,8 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "credential-demo": "node src/credential_demo.js"
   },
   "dependencies": {
     "@noble/hashes": "^1.6.0",

@@ -7,50 +7,32 @@ import { cryptoWaitReady, mnemonicGenerate } from '@polkadot/util-crypto';
 import { ml_dsa44 } from '@noble/post-quantum/ml-dsa';
 import { randomBytes } from '@noble/post-quantum/utils';
 
-import { deriveDidId, deriveSchemaId, concatBytes } from './did_utils.js';
+import { deriveDidId, concatBytes } from './did_utils.js';
 import { resolveDid } from './did_resolver.js';
-import { loadDidKeys, storeDidKeys } from './did_store.js';
+import { loadDidKeys, storeDidKeys, storeKey } from './did_store.js';
 import {
   addKey,
   addService,
   createApi,
   createDid,
-  deactivateDid,
-  deprecateSchema,
   didSupportsKeyMaterial,
   getFreeBalance,
   materialForRuntime,
-  registerSchema,
-  removeMetadata,
-  removeService,
-  revokeKey,
-  rotateKey,
   setMetadata,
-  updateRoles,
 } from './substrate_client.js';
 import { logReceipt } from './tx_logger.js';
 
 const LOG_OK = '✅';
 const LOG_WARN = '⚠️';
 const LOG_DID = '🪪';
-const LOG_SCHEMA = '📜';
 const LOG_STEP = '➡️';
 const DID_CREATE_PREFIX = 'QSB_DID_CREATE';
 const DID_ADD_KEY_PREFIX = 'QSB_DID_ADD_KEY';
-const DID_REVOKE_KEY_PREFIX = 'QSB_DID_REVOKE_KEY';
-const DID_DEACTIVATE_PREFIX = 'QSB_DID_DEACTIVATE';
 const DID_ADD_SERVICE_PREFIX = 'QSB_DID_ADD_SERVICE';
-const DID_REMOVE_SERVICE_PREFIX = 'QSB_DID_REMOVE_SERVICE';
 const DID_SET_METADATA_PREFIX = 'QSB_DID_SET_METADATA';
-const DID_REMOVE_METADATA_PREFIX = 'QSB_DID_REMOVE_METADATA';
-const DID_ROTATE_KEY_PREFIX = 'QSB_DID_ROTATE_KEY';
-const DID_UPDATE_ROLES_PREFIX = 'QSB_DID_UPDATE_ROLES';
-const DEFAULT_SERVICE_ID = '#service-1';
-const DEFAULT_SERVICE_TYPE = 'ExampleService';
-const DEFAULT_SERVICE_ENDPOINT = 'https://example.com';
-const DEFAULT_SCHEMA_URI = 'https://example.com/schema';
-const DEFAULT_SCHEMA_BASE = { name: 'example', version: '1.0' };
 const MULTICODEC_ML_DSA_44 = 0x1210;
+const MULTICODEC_ED25519_PUB = 0xed;
+const MULTICODEC_P256_PUB = 0x1201;
 
 async function createAndStoreAccount(jsonPath, password) {
   await cryptoWaitReady();
@@ -77,15 +59,6 @@ async function loadOrCreateAccount(jsonPath, password) {
   const pair = keyring.addFromJson(accountJson);
   pair.decodePkcs8(password);
   return pair;
-}
-
-function buildSchemaJson() {
-  const obj = { ...DEFAULT_SCHEMA_BASE, _nonce: cryptoRandomId() };
-  return JSON.stringify(obj);
-}
-
-function cryptoRandomId() {
-  return crypto.randomUUID().replace(/-/g, '');
 }
 
 function toBytes(value) {
@@ -123,21 +96,94 @@ function toJwkMaterial(jwkBytes) {
   return { Jwk: toBytesArg(jwkBytes) };
 }
 
-function generateMlDsa44MultikeyMaterial() {
+function generateMlDsa44Key() {
   const keys = ml_dsa44.keygen(randomBytes(32));
   const publicKey = keys.publicKey ?? keys[0];
-  return toMultikeyMaterial(toBytes(toMultikey(publicKey)));
+  const privateKey = keys.secretKey ?? keys[1];
+  return { material: toMultikeyMaterial(toBytes(toMultikey(publicKey))), publicKey, privateKey };
 }
 
-function generateJwkBytes(kind) {
+function generateJwkKey(kind) {
   const options =
     kind === 'p256'
       ? ['ec', { namedCurve: 'P-256' }]
       : ['ed25519', undefined];
-  const { publicKey } = options[1]
+  const { publicKey, privateKey } = options[1]
     ? crypto.generateKeyPairSync(options[0], options[1])
     : crypto.generateKeyPairSync(options[0]);
-  return toBytes(JSON.stringify(publicKey.export({ format: 'jwk' })));
+  const publicJwk = publicKey.export({ format: 'jwk' });
+  const privateJwk = privateKey.export({ format: 'jwk' });
+  return {
+    material: toJwkMaterial(toBytes(JSON.stringify(publicJwk))),
+    publicKey: Buffer.from(publicJwk.x, 'base64url'),
+    privateKey: Buffer.from(privateJwk.d, 'base64url'),
+  };
+}
+
+function generateEd25519MultikeyKey() {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const publicJwk = publicKey.export({ format: 'jwk' });
+  const privateJwk = privateKey.export({ format: 'jwk' });
+  const publicKeyRaw = Buffer.from(publicJwk.x, 'base64url');
+  const privateKeyRaw = Buffer.from(privateJwk.d, 'base64url');
+  return {
+    material: toMultikeyMaterial(toBytes(toMultikey(publicKeyRaw, MULTICODEC_ED25519_PUB))),
+    publicKey: publicKeyRaw,
+    privateKey: privateKeyRaw,
+  };
+}
+
+function compressP256PublicKey(x, y) {
+  const isEven = BigInt(`0x${y.toString('hex')}`) % 2n === 0n;
+  return Buffer.concat([Buffer.from([isEven ? 0x02 : 0x03]), x]);
+}
+
+function generateP256MultikeyKey() {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const publicJwk = publicKey.export({ format: 'jwk' });
+  const privateJwk = privateKey.export({ format: 'jwk' });
+  const x = Buffer.from(publicJwk.x, 'base64url');
+  const y = Buffer.from(publicJwk.y, 'base64url');
+  const compressed = compressP256PublicKey(x, y);
+  const privateKeyRaw = Buffer.from(privateJwk.d, 'base64url');
+  return {
+    material: toMultikeyMaterial(toBytes(toMultikey(compressed, MULTICODEC_P256_PUB))),
+    publicKey: compressed,
+    privateKey: privateKeyRaw,
+  };
+}
+
+function buildDemoKeyPlan(supportsKeyMaterial) {
+  const auth = generateMlDsa44Key();
+  const invocation = generateMlDsa44Key();
+
+  if (supportsKeyMaterial) {
+    const assertion = generateJwkKey('ed25519');
+    const agreement = generateJwkKey('p256');
+    return [
+      { suffixText: '#auth-mldsa44', roles: ['Authentication'], ...auth },
+      { suffixText: '#invocation-mldsa44', roles: ['CapabilityInvocation'], ...invocation },
+      { suffixText: '#assertion-ed25519-jwk', roles: ['AssertionMethod'], ...assertion },
+      {
+        suffixText: '#agreement-p256-jwk',
+        roles: ['KeyAgreement', 'CapabilityDelegation'],
+        ...agreement,
+      },
+    ];
+  }
+
+  const assertion = generateEd25519MultikeyKey();
+  const agreement = generateP256MultikeyKey();
+  return [
+    { suffixText: '#auth-mldsa44', roles: ['Authentication'], ...auth },
+    { suffixText: '#invocation-mldsa44', roles: ['CapabilityInvocation'], ...invocation },
+    { suffixText: '#assertion-ed25519', roles: ['AssertionMethod'], ...assertion },
+    {
+      suffixText: '#agreement-p256',
+      roles: ['KeyAgreement', 'CapabilityDelegation'],
+      ...agreement,
+    },
+  ];
 }
 
 function buildDidPayload(prefix, call) {
@@ -217,270 +263,140 @@ async function main() {
     await storeDidKeys(did, publicKey, privateKey);
   }
 
-  const genesisHash = (await api.rpc.chain.getBlockHash(0)).toHex();
-
   console.log(`${LOG_STEP} Step: resolve DID document`);
   const didResolution = await resolveDid(api, did);
-  console.log(`${LOG_DID} DID resolution:`);
-  console.log(JSON.stringify(didResolution, null, 2));
-  if (loadedFromStore && didResolution.didDocumentMetadata.deactivated) {
+  const resolutionError = didResolution.didResolutionMetadata.error;
+  if (resolutionError === 'runtimeApiDecodeError' && loadedFromStore) {
     throw new Error(
-      'Stored DID is deactivated. Remove storage/did_store.json or set DID_STORE_PATH to a new file.'
+      'Stored DID cannot be decoded by the current node runtime API. This usually means the ' +
+        'local did_store.json points to a DID created with an older pallet storage layout. ' +
+        'Remove the local DID store or set DID_STORE_PATH to a new file and run again. ' +
+        `Current DID_STORE_PATH: ${process.env.DID_STORE_PATH || 'did_store.json'}`
     );
   }
+  if (resolutionError === 'runtimeApiDecodeError') {
+    throw new Error(
+      'Newly created DID cannot be decoded by did_getByString. The connected RPC node likely ' +
+        'does not match the runtime/API expected by this example.'
+    );
+  }
+  console.log(`${LOG_DID} DID resolution:`);
+  console.log(JSON.stringify(didResolution, null, 2));
 
   const didId = toBytes(did);
   const didIdArg = toBytesArg(didId);
 
-  console.log(`${LOG_STEP} Step: add DID key (assertion method)`);
+  console.log(`${LOG_STEP} Step: add DID keys for different roles`);
   if (!supportsKeyMaterial) {
     console.log(
       `${LOG_WARN} Connected runtime does not expose KeyMaterialInput; ` +
-        'JWK demo keys are skipped and Multikey is used for added keys.'
+        'JWK demo keys are skipped and Multikey is used for all added keys.'
     );
   }
-  const secondaryKeySuffixText = supportsKeyMaterial ? '#jwk-1' : '#key-1';
-  const secondaryKeyMaterial = supportsKeyMaterial
-    ? toJwkMaterial(generateJwkBytes('ed25519'))
-    : generateMlDsa44MultikeyMaterial();
-  const secondaryKeySuffix = toBytes(secondaryKeySuffixText);
-  const secondaryKeyId = toBytes(`${did}${secondaryKeySuffixText}`);
-  const addKeyRoles = ['AssertionMethod'];
-  const addKeyCall = api.tx.did.addKey(
-    didIdArg,
-    toBytesArg(secondaryKeySuffix),
-    materialForRuntime(api, secondaryKeyMaterial),
-    addKeyRoles,
-    null,
-    []
-  );
-  const addKeySignature = signDidCall(privateKey, DID_ADD_KEY_PREFIX, addKeyCall);
-  let result = await addKey(
-    api,
-    account,
-    didIdArg,
-    secondaryKeySuffix,
-    secondaryKeyMaterial,
-    addKeyRoles,
-    null,
-    addKeySignature
-  );
-  logReceipt(result);
-  ensureExtrinsicSuccess(result, 'addKey');
-
-  console.log(`${LOG_STEP} Step: update DID key roles`);
-  const updatedRoles = ['AssertionMethod', 'Authentication'];
-  const updateRolesCall = api.tx.did.updateRoles(
-    didIdArg,
-    toBytesArg(secondaryKeyId),
-    updatedRoles,
-    []
-  );
-  const updateRolesSignature = signDidCall(privateKey, DID_UPDATE_ROLES_PREFIX, updateRolesCall);
-  result = await updateRoles(
-    api,
-    account,
-    didIdArg,
-    secondaryKeyId,
-    updatedRoles,
-    updateRolesSignature
-  );
-  logReceipt(result);
-  ensureExtrinsicSuccess(result, 'updateRoles');
-
-  console.log(`${LOG_STEP} Step: rotate DID key`);
-  const rotated = ml_dsa44.keygen(randomBytes(32));
-  const rotatedPublicKey = rotated.publicKey ?? rotated[0];
-  const rotatedMultikey = toBytes(toMultikey(rotatedPublicKey));
-  const rotatedKeyMaterial = toMultikeyMaterial(rotatedMultikey);
-  const rotatedKeySuffix = toBytes('#key-2');
-  const rotatedKeyId = toBytes(`${did}#key-2`);
-  const rotateRoles = ['CapabilityDelegation'];
-  const rotateKeyCall = api.tx.did.rotateKey(
-    didIdArg,
-    toBytesArg(secondaryKeyId),
-    materialForRuntime(api, rotatedKeyMaterial),
-    toBytesArg(rotatedKeySuffix),
-    null,
-    rotateRoles,
-    []
-  );
-  const rotateKeySignature = signDidCall(privateKey, DID_ROTATE_KEY_PREFIX, rotateKeyCall);
-  result = await rotateKey(
-    api,
-    account,
-    didIdArg,
-    secondaryKeyId,
-    rotatedKeyMaterial,
-    rotatedKeySuffix,
-    null,
-    rotateRoles,
-    rotateKeySignature
-  );
-  logReceipt(result);
-  ensureExtrinsicSuccess(result, 'rotateKey');
-
-  console.log(`${LOG_STEP} Step: add additional DID keys`);
-  const mixedKeys = [
-    {
-      suffix: toBytes('#key-3'),
-      material: generateMlDsa44MultikeyMaterial(),
-      roles: ['Authentication'],
-    },
-    {
-      suffix: toBytes(supportsKeyMaterial ? '#jwk-2' : '#key-4'),
-      material: supportsKeyMaterial
-        ? toJwkMaterial(generateJwkBytes('p256'))
-        : generateMlDsa44MultikeyMaterial(),
-      roles: ['KeyAgreement'],
-    },
-  ];
-  for (const item of mixedKeys) {
-    const addMixedKeyCall = api.tx.did.addKey(
+  const keysToAdd = buildDemoKeyPlan(supportsKeyMaterial);
+  for (const keyEntry of keysToAdd) {
+    const suffix = toBytes(keyEntry.suffixText);
+    const addKeyCall = api.tx.did.addKey(
       didIdArg,
-      toBytesArg(item.suffix),
-      materialForRuntime(api, item.material),
-      item.roles,
+      toBytesArg(suffix),
+      materialForRuntime(api, keyEntry.material),
+      keyEntry.roles,
       null,
       []
     );
-    const addMixedKeySignature = signDidCall(privateKey, DID_ADD_KEY_PREFIX, addMixedKeyCall);
-    result = await addKey(
+    const addKeySignature = signDidCall(privateKey, DID_ADD_KEY_PREFIX, addKeyCall);
+    const result = await addKey(
       api,
       account,
       didIdArg,
-      item.suffix,
-      item.material,
-      item.roles,
+      suffix,
+      keyEntry.material,
+      keyEntry.roles,
       null,
-      addMixedKeySignature
+      addKeySignature
     );
     logReceipt(result);
     ensureExtrinsicSuccess(result, 'addKey');
+    console.log(`${LOG_DID} Added key ${did}${keyEntry.suffixText} roles=${JSON.stringify(keyEntry.roles)}`);
+    await storeKey(did, keyEntry.suffixText, keyEntry.publicKey, keyEntry.privateKey);
   }
 
-  console.log(`${LOG_STEP} Step: set DID metadata`);
-  const metadataKey = toBytes('profile');
-  const metadataValue = toBytes('https://example.com/profile');
-  const setMetadataCall = api.tx.did.setMetadata(
-    didIdArg,
-    { key: toBytesArg(metadataKey), value: toBytesArg(metadataValue) },
-    []
-  );
-  const setMetadataSignature = signDidCall(privateKey, DID_SET_METADATA_PREFIX, setMetadataCall);
-  result = await setMetadata(
-    api,
-    account,
-    didIdArg,
-    metadataKey,
-    metadataValue,
-    setMetadataSignature
-  );
-  logReceipt(result);
-  ensureExtrinsicSuccess(result, 'setMetadata');
+  console.log(`${LOG_STEP} Step: add DID metadata`);
+  const metadataEntries = [
+    ['profile', 'https://profiles.example.org/alice'],
+    ['organization', 'QSB Labs'],
+    ['environment', 'demo'],
+    ['keySuite', 'ML-DSA-44,Ed25519,P-256'],
+  ];
+  for (const [keyText, valueText] of metadataEntries) {
+    const metadataKey = toBytes(keyText);
+    const metadataValue = toBytes(valueText);
+    const setMetadataCall = api.tx.did.setMetadata(
+      didIdArg,
+      { key: toBytesArg(metadataKey), value: toBytesArg(metadataValue) },
+      []
+    );
+    const setMetadataSignature = signDidCall(privateKey, DID_SET_METADATA_PREFIX, setMetadataCall);
+    const result = await setMetadata(
+      api,
+      account,
+      didIdArg,
+      metadataKey,
+      metadataValue,
+      setMetadataSignature
+    );
+    logReceipt(result);
+    ensureExtrinsicSuccess(result, 'setMetadata');
+    console.log(`${LOG_OK} Metadata set: ${keyText}`);
+  }
 
-  console.log(`${LOG_STEP} Step: add DID service`);
-  const serviceId = toBytes(DEFAULT_SERVICE_ID);
-  const serviceType = toBytes(DEFAULT_SERVICE_TYPE);
-  const serviceEndpoint = toBytes(DEFAULT_SERVICE_ENDPOINT);
-  const serviceIdArg = toBytesArg(serviceId);
-  const serviceTypeArg = toBytesArg(serviceType);
-  const serviceEndpointArg = toBytesArg(serviceEndpoint);
-  const addServiceCall = api.tx.did.addService(
-    didIdArg,
-    { id: serviceIdArg, service_type: serviceTypeArg, endpoint: serviceEndpointArg },
-    []
-  );
-  const addServiceSignature = ml_dsa44.sign(
-    privateKey,
-    buildDidPayload(DID_ADD_SERVICE_PREFIX, addServiceCall)
-  );
-  result = await addService(
-    api,
-    account,
-    didIdArg,
-    serviceId,
-    serviceType,
-    serviceEndpoint,
-    addServiceSignature
-  );
-  logReceipt(result);
-  ensureExtrinsicSuccess(result, 'addService');
+  console.log(`${LOG_STEP} Step: add multiple DID services with DID URL id + full URI endpoint`);
+  const servicesToAdd = [
+    [`${did}#messaging`, 'MessagingService', 'https://resolver.example.org/api/v1/messages'],
+    [
+      `${did}#credentials`,
+      'CredentialRegistry',
+      'https://wallet.example.org/credentials/status/2026',
+    ],
+    [`${did}#profile`, 'ProfileService', 'https://profiles.example.org/alice'],
+  ];
+  for (const [serviceIdText, serviceTypeText, serviceEndpointText] of servicesToAdd) {
+    const serviceId = toBytes(serviceIdText);
+    const serviceType = toBytes(serviceTypeText);
+    const serviceEndpoint = toBytes(serviceEndpointText);
+    const addServiceCall = api.tx.did.addService(
+      didIdArg,
+      {
+        id: toBytesArg(serviceId),
+        service_type: toBytesArg(serviceType),
+        endpoint: toBytesArg(serviceEndpoint),
+      },
+      []
+    );
+    const addServiceSignature = ml_dsa44.sign(
+      privateKey,
+      buildDidPayload(DID_ADD_SERVICE_PREFIX, addServiceCall)
+    );
+    const result = await addService(
+      api,
+      account,
+      didIdArg,
+      serviceId,
+      serviceType,
+      serviceEndpoint,
+      addServiceSignature
+    );
+    logReceipt(result);
+    ensureExtrinsicSuccess(result, 'addService');
+    console.log(`${LOG_OK} Service added: ${serviceIdText}`);
+  }
 
-  console.log(`${LOG_STEP} Step: resolve DID document (after add service)`);
-  const didResolution2 = await resolveDid(api, did);
-  console.log(`${LOG_DID} DID resolution:`);
-  console.log(JSON.stringify(didResolution2, null, 2));
+  console.log(`${LOG_STEP} Step: resolve final DID document`);
+  const finalResolution = await resolveDid(api, did);
+  console.log(`${LOG_DID} Final DID resolution:`);
+  console.log(JSON.stringify(finalResolution, null, 2));
+  console.log(`${LOG_OK} Done. DID document above is ready to present.`);
 
-  console.log(`${LOG_STEP} Step: remove DID service`);
-  const removeServiceCall = api.tx.did.removeService(didIdArg, serviceIdArg, []);
-  const removeServiceSignature = ml_dsa44.sign(
-    privateKey,
-    buildDidPayload(DID_REMOVE_SERVICE_PREFIX, removeServiceCall)
-  );
-  result = await removeService(api, account, didIdArg, serviceIdArg, removeServiceSignature);
-  logReceipt(result);
-  ensureExtrinsicSuccess(result, 'removeService');
-
-  console.log(`${LOG_STEP} Step: remove DID metadata`);
-  const removeMetadataCall = api.tx.did.removeMetadata(didIdArg, toBytesArg(metadataKey), []);
-  const removeMetadataSignature = signDidCall(
-    privateKey,
-    DID_REMOVE_METADATA_PREFIX,
-    removeMetadataCall
-  );
-  result = await removeMetadata(api, account, didIdArg, metadataKey, removeMetadataSignature);
-  logReceipt(result);
-  ensureExtrinsicSuccess(result, 'removeMetadata');
-
-  console.log(`${LOG_STEP} Step: revoke rotated DID key`);
-  const revokeKeyCall = api.tx.did.revokeKey(didIdArg, toBytesArg(rotatedKeyId), []);
-  const revokeKeySignature = signDidCall(privateKey, DID_REVOKE_KEY_PREFIX, revokeKeyCall);
-  result = await revokeKey(api, account, didIdArg, rotatedKeyId, revokeKeySignature);
-  logReceipt(result);
-  ensureExtrinsicSuccess(result, 'revokeKey');
-
-  console.log(`${LOG_STEP} Step: register schema`);
-  const schemaJsonRaw = buildSchemaJson();
-  const schemaJson = toBytes(schemaJsonRaw);
-  const schemaUri = toBytes(DEFAULT_SCHEMA_URI);
-  const schemaId = deriveSchemaId(genesisHash, schemaJson);
-  console.log(`${LOG_SCHEMA} Schema ID: ${schemaId}`);
-  const schemaSignature = ml_dsa44.sign(privateKey, concatBytes(toBytes('QSB_SCHEMA'), schemaJson));
-  result = await registerSchema(
-    api,
-    account,
-    schemaJson,
-    schemaUri,
-    toBytes(did),
-    schemaSignature
-  );
-  logReceipt(result);
-  ensureExtrinsicSuccess(result, 'registerSchema');
-
-  console.log(`${LOG_STEP} Step: deprecate schema`);
-  result = await deprecateSchema(
-    api,
-    account,
-    toBytes(schemaId),
-    toBytes(did),
-    schemaSignature
-  );
-  logReceipt(result);
-  ensureExtrinsicSuccess(result, 'deprecateSchema');
-
-  console.log(`${LOG_STEP} Step: deactivate DID`);
-  const deactivateDidCall = api.tx.did.deactivateDid(didIdArg, []);
-  const deactivateDidSignature = signDidCall(
-    privateKey,
-    DID_DEACTIVATE_PREFIX,
-    deactivateDidCall
-  );
-  result = await deactivateDid(api, account, didIdArg, deactivateDidSignature);
-  logReceipt(result);
-  ensureExtrinsicSuccess(result, 'deactivateDid');
-
-  console.log(`${LOG_OK} Done.`);
   await api.disconnect();
 }
 
